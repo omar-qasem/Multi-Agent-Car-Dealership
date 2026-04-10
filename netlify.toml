@@ -3,7 +3,7 @@
 # ============================================================
 
 [build]
-  command = "cd client && npm install && npm run build:netlify"
+  command = "npm run build:netlify"
   publish = "client/dist"
   functions = "netlify/functions"
 

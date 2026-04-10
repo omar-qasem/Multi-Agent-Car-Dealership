@@ -254,7 +254,7 @@ async function executeTool(toolName, args, customerPhone) {
             price: `${p.price} دينار`,
             available: p.quantity > 0,
             quantity: p.quantity,
-            compatible_with: p.compatible.join('، '),
+            compatible_with: (Array.isArray(p.compatible) ? p.compatible : []).join('، '),
           })),
         };
       }
