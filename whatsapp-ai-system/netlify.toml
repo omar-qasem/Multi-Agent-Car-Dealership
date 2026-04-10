@@ -1,0 +1,70 @@
+# ============================================================
+# Netlify Configuration
+# ============================================================
+
+[build]
+  command = "npm run build:netlify"
+  publish = "client/dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NPM_CONFIG_PRODUCTION = "false"
+
+# ============================================================
+# إعدادات الـ Functions
+# ============================================================
+[functions]
+  node_bundler = "esbuild"
+  included_files = ["server/**", "node_modules/**"]
+
+# ============================================================
+# Redirects - ترتيبها مهم (الأكثر تحديداً أولاً)
+# ============================================================
+
+# Debug endpoint
+[[redirects]]
+  from = "/debug-env"
+  to = "/.netlify/functions/api"
+  status = 200
+  force = true
+  [redirects.query]
+    path = "/debug-env"
+
+# Webhook (أعلى أولوية)
+[[redirects]]
+  from = "/webhook"
+  to = "/.netlify/functions/api"
+  status = 200
+  force = true
+
+# Health Check
+[[redirects]]
+  from = "/health"
+  to = "/.netlify/functions/api"
+  status = 200
+  force = true
+
+# API Routes
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api"
+  status = 200
+  force = true
+
+# SPA Fallback (يجب أن يكون آخر شيء)
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# ============================================================
+# Headers
+# ============================================================
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+
+# CORS headers handled by Express — DO NOT set them here
+# Setting Access-Control-Allow-Origin: * conflicts with credentials: true
+# and causes browsers to reject authenticated API responses

@@ -1,0 +1,177 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================
+   الخطوط العربية والاتجاه
+   ============================================ */
+@layer base {
+  html {
+    direction: rtl;
+    font-family: 'Tajawal', 'Cairo', sans-serif;
+  }
+
+  body {
+    @apply bg-gray-50 text-gray-900 dark:bg-gray-900 dark:text-gray-100;
+    font-size: 16px;
+    line-height: 1.6;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* Scrollbar مخصصة */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-100 dark:bg-gray-800;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 dark:bg-gray-600 rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400 dark:bg-gray-500;
+  }
+}
+
+/* ============================================
+   مكونات مخصصة
+   ============================================ */
+@layer components {
+  /* بطاقة إحصائية */
+  .stat-card {
+    @apply bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-sm
+           border border-gray-100 dark:border-gray-700
+           transition-all duration-200 hover:shadow-md hover:-translate-y-0.5;
+  }
+
+  /* زر أساسي */
+  .btn-primary {
+    @apply bg-whatsapp-green hover:bg-whatsapp-dark text-white
+           font-medium px-6 py-2.5 rounded-xl transition-all duration-200
+           focus:outline-none focus:ring-2 focus:ring-whatsapp-green focus:ring-offset-2
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  /* زر ثانوي */
+  .btn-secondary {
+    @apply bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600
+           text-gray-700 dark:text-gray-200 font-medium px-6 py-2.5 rounded-xl
+           transition-all duration-200 focus:outline-none focus:ring-2
+           focus:ring-gray-300 focus:ring-offset-2;
+  }
+
+  /* حقل إدخال */
+  .input-field {
+    @apply w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-600
+           bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+           focus:outline-none focus:ring-2 focus:ring-whatsapp-green focus:border-transparent
+           placeholder-gray-400 dark:placeholder-gray-500 transition-all duration-200;
+  }
+
+  /* فقاعة رسالة العميل */
+  .bubble-customer {
+    @apply bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100
+           rounded-2xl rounded-tr-sm p-3 max-w-xs shadow-sm
+           border border-gray-100 dark:border-gray-600;
+  }
+
+  /* فقاعة رسالة AI */
+  .bubble-ai {
+    @apply bg-whatsapp-light dark:bg-green-900/40 text-gray-800 dark:text-gray-100
+           rounded-2xl rounded-tl-sm p-3 max-w-xs shadow-sm;
+  }
+
+  /* شريط التنقل */
+  .nav-item {
+    @apply flex items-center gap-3 px-4 py-3 rounded-xl text-gray-600 dark:text-gray-400
+           hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-whatsapp-green
+           transition-all duration-200 cursor-pointer font-medium;
+  }
+
+  .nav-item.active {
+    @apply bg-whatsapp-green/10 text-whatsapp-green dark:text-whatsapp-green;
+  }
+
+  /* Badge */
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-positive {
+    @apply badge bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400;
+  }
+
+  .badge-negative {
+    @apply badge bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400;
+  }
+
+  .badge-neutral {
+    @apply badge bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400;
+  }
+
+  /* بطاقة محادثة */
+  .conversation-card {
+    @apply flex items-center gap-3 p-4 cursor-pointer
+           hover:bg-gray-50 dark:hover:bg-gray-700/50
+           border-b border-gray-100 dark:border-gray-700
+           transition-all duration-150;
+  }
+
+  .conversation-card.selected {
+    @apply bg-whatsapp-green/10 dark:bg-whatsapp-green/20;
+  }
+}
+
+/* ============================================
+   أنيميشن
+   ============================================ */
+@layer utilities {
+  .animate-message-in {
+    animation: messageIn 0.3s ease-out;
+  }
+
+  @keyframes messageIn {
+    from {
+      opacity: 0;
+      transform: translateY(8px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  /* مؤشر الكتابة */
+  .typing-indicator span {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: #25D366;
+    animation: typing 1.4s infinite;
+  }
+
+  .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes typing {
+    0%, 80%, 100% { transform: scale(0.7); opacity: 0.5; }
+    40% { transform: scale(1); opacity: 1; }
+  }
+}
+
+/* ============================================
+   Dark Mode
+   ============================================ */
+.dark .chart-container {
+  filter: brightness(0.9);
+}

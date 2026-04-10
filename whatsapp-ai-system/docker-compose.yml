@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # ============================================================
+  # السيرفر الرئيسي (Backend + Frontend في الإنتاج)
+  # ============================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whatsapp-ai-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - whatsapp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ============================================================
+  # Nginx Reverse Proxy (اختياري - للإنتاج)
+  # ============================================================
+  nginx:
+    image: nginx:alpine
+    container_name: whatsapp-ai-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - app
+    networks:
+      - whatsapp-network
+    profiles:
+      - production
+
+networks:
+  whatsapp-network:
+    driver: bridge

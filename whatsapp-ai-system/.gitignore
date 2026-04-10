@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build
+client/dist/
+client/build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# SSL Certificates & Secrets
+ssl/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+service-account*.json
+google-credentials*.json
+credentials.json
+secrets/
+private/
