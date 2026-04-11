@@ -2,18 +2,31 @@
 -- Auto Jordan WhatsApp AI System - Comprehensive Supabase Schema
 -- ================================================================
 -- Run this in your Supabase SQL Editor ONCE to create all tables.
--- Safe to re-run: uses IF NOT EXISTS and ON CONFLICT.
+-- Uses UUID primary keys to match Supabase's native type system.
 -- ================================================================
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ================================================================
+-- DROP EXISTING TABLES (clean slate — CASCADE removes FKs first)
+-- Safe to run on a fresh project or to reset an existing one.
+-- ================================================================
+DROP TABLE IF EXISTS messages           CASCADE;
+DROP TABLE IF EXISTS purchase_inquiries CASCADE;
+DROP TABLE IF EXISTS support_tickets    CASCADE;
+DROP TABLE IF EXISTS bookings           CASCADE;
+DROP TABLE IF EXISTS customers          CASCADE;
+DROP TABLE IF EXISTS promotions         CASCADE;
+DROP TABLE IF EXISTS parts              CASCADE;
+DROP TABLE IF EXISTS cars               CASCADE;
 
 -- ================================================================
 -- 1. CARS TABLE
--- All fields used by the code: condition, features, engine, etc.
 -- ================================================================
-CREATE TABLE IF NOT EXISTS cars (
-  id              BIGSERIAL PRIMARY KEY,
+CREATE TABLE cars (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   make            TEXT NOT NULL,
   model           TEXT NOT NULL,
   year            INTEGER NOT NULL,
@@ -35,10 +48,9 @@ CREATE TABLE IF NOT EXISTS cars (
 
 -- ================================================================
 -- 2. PARTS TABLE
--- compatible is a TEXT[] array to match in-memory shape
 -- ================================================================
-CREATE TABLE IF NOT EXISTS parts (
-  id              BIGSERIAL PRIMARY KEY,
+CREATE TABLE parts (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name            TEXT NOT NULL,
   part_number     TEXT,
   category        TEXT,
@@ -55,10 +67,9 @@ CREATE TABLE IF NOT EXISTS parts (
 
 -- ================================================================
 -- 3. CUSTOMERS TABLE
--- Includes loyalty_points, car_make, car_model (used by webhook)
 -- ================================================================
-CREATE TABLE IF NOT EXISTS customers (
-  id              BIGSERIAL PRIMARY KEY,
+CREATE TABLE customers (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   phone           TEXT UNIQUE NOT NULL,
   name            TEXT,
   email           TEXT,
@@ -74,11 +85,10 @@ CREATE TABLE IF NOT EXISTS customers (
 
 -- ================================================================
 -- 4. BOOKINGS TABLE
--- Keeps car_make/car_model/car_year/service_type/branch separately
 -- ================================================================
-CREATE TABLE IF NOT EXISTS bookings (
-  id              BIGSERIAL PRIMARY KEY,
-  customer_id     BIGINT REFERENCES customers(id) ON DELETE SET NULL,
+CREATE TABLE bookings (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id     uuid REFERENCES customers(id) ON DELETE SET NULL,
   customer_phone  TEXT NOT NULL,
   customer_name   TEXT,
   car_make        TEXT,
@@ -99,9 +109,9 @@ CREATE TABLE IF NOT EXISTS bookings (
 -- ================================================================
 -- 5. SUPPORT TICKETS TABLE
 -- ================================================================
-CREATE TABLE IF NOT EXISTS support_tickets (
-  id                BIGSERIAL PRIMARY KEY,
-  customer_id       BIGINT REFERENCES customers(id) ON DELETE SET NULL,
+CREATE TABLE support_tickets (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id       uuid REFERENCES customers(id) ON DELETE SET NULL,
   customer_phone    TEXT NOT NULL,
   customer_name     TEXT,
   subject           TEXT,
@@ -117,11 +127,10 @@ CREATE TABLE IF NOT EXISTS support_tickets (
 
 -- ================================================================
 -- 6. PURCHASE INQUIRIES TABLE
--- Keeps car_make/car_model/budget separately
 -- ================================================================
-CREATE TABLE IF NOT EXISTS purchase_inquiries (
-  id              BIGSERIAL PRIMARY KEY,
-  customer_id     BIGINT REFERENCES customers(id) ON DELETE SET NULL,
+CREATE TABLE purchase_inquiries (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id     uuid REFERENCES customers(id) ON DELETE SET NULL,
   customer_phone  TEXT NOT NULL,
   customer_name   TEXT,
   car_make        TEXT,
@@ -138,13 +147,12 @@ CREATE TABLE IF NOT EXISTS purchase_inquiries (
 );
 
 -- ================================================================
--- 7. MESSAGES TABLE — flat, one row per message
--- Better for analytics, filtering, exports than JSONB arrays
+-- 7. MESSAGES TABLE
 -- ================================================================
-CREATE TABLE IF NOT EXISTS messages (
-  id                BIGSERIAL PRIMARY KEY,
+CREATE TABLE messages (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   phone_number      TEXT NOT NULL,
-  customer_id       BIGINT REFERENCES customers(id) ON DELETE SET NULL,
+  customer_id       uuid REFERENCES customers(id) ON DELETE SET NULL,
   customer_name     TEXT,
   customer_message  TEXT,
   ai_response       TEXT,
@@ -162,8 +170,8 @@ CREATE TABLE IF NOT EXISTS messages (
 -- ================================================================
 -- 8. PROMOTIONS TABLE
 -- ================================================================
-CREATE TABLE IF NOT EXISTS promotions (
-  id              BIGSERIAL PRIMARY KEY,
+CREATE TABLE promotions (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   title           TEXT NOT NULL,
   description     TEXT,
   discount_type   TEXT DEFAULT 'offer',
@@ -178,28 +186,28 @@ CREATE TABLE IF NOT EXISTS promotions (
 -- ================================================================
 -- INDEXES (performance)
 -- ================================================================
-CREATE INDEX IF NOT EXISTS idx_cars_status          ON cars(status);
-CREATE INDEX IF NOT EXISTS idx_cars_make_model      ON cars(make, model);
-CREATE INDEX IF NOT EXISTS idx_cars_branch          ON cars(branch);
-CREATE INDEX IF NOT EXISTS idx_parts_name           ON parts(name);
-CREATE INDEX IF NOT EXISTS idx_parts_category       ON parts(category);
-CREATE INDEX IF NOT EXISTS idx_customers_phone      ON customers(phone);
-CREATE INDEX IF NOT EXISTS idx_bookings_status      ON bookings(status);
-CREATE INDEX IF NOT EXISTS idx_bookings_phone       ON bookings(customer_phone);
-CREATE INDEX IF NOT EXISTS idx_bookings_created     ON bookings(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tickets_status       ON support_tickets(status);
-CREATE INDEX IF NOT EXISTS idx_tickets_phone        ON support_tickets(customer_phone);
-CREATE INDEX IF NOT EXISTS idx_inquiries_status     ON purchase_inquiries(status);
-CREATE INDEX IF NOT EXISTS idx_inquiries_phone      ON purchase_inquiries(customer_phone);
-CREATE INDEX IF NOT EXISTS idx_messages_phone       ON messages(phone_number);
-CREATE INDEX IF NOT EXISTS idx_messages_created     ON messages(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_topic       ON messages(topic);
-CREATE INDEX IF NOT EXISTS idx_messages_sentiment   ON messages(sentiment);
-CREATE INDEX IF NOT EXISTS idx_promotions_active    ON promotions(active);
+CREATE INDEX idx_cars_status          ON cars(status);
+CREATE INDEX idx_cars_make_model      ON cars(make, model);
+CREATE INDEX idx_cars_branch          ON cars(branch);
+CREATE INDEX idx_parts_name           ON parts(name);
+CREATE INDEX idx_parts_category       ON parts(category);
+CREATE INDEX idx_customers_phone      ON customers(phone);
+CREATE INDEX idx_bookings_status      ON bookings(status);
+CREATE INDEX idx_bookings_phone       ON bookings(customer_phone);
+CREATE INDEX idx_bookings_created     ON bookings(created_at DESC);
+CREATE INDEX idx_tickets_status       ON support_tickets(status);
+CREATE INDEX idx_tickets_phone        ON support_tickets(customer_phone);
+CREATE INDEX idx_inquiries_status     ON purchase_inquiries(status);
+CREATE INDEX idx_inquiries_phone      ON purchase_inquiries(customer_phone);
+CREATE INDEX idx_messages_phone       ON messages(phone_number);
+CREATE INDEX idx_messages_created     ON messages(created_at DESC);
+CREATE INDEX idx_messages_topic       ON messages(topic);
+CREATE INDEX idx_messages_sentiment   ON messages(sentiment);
+CREATE INDEX idx_promotions_active    ON promotions(active);
 
 -- ================================================================
 -- ROW LEVEL SECURITY
--- Service Key (backend) bypasses RLS automatically.
+-- service_role key (used by backend) bypasses RLS automatically.
 -- Anon key has NO access.
 -- ================================================================
 ALTER TABLE cars               ENABLE ROW LEVEL SECURITY;
@@ -211,12 +219,8 @@ ALTER TABLE purchase_inquiries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE promotions         ENABLE ROW LEVEL SECURITY;
 
--- Note: service_role key bypasses RLS entirely, so backend has full access.
--- No policies are created for anon/authenticated roles — they have zero access.
--- This is the correct security posture for a backend-only database.
-
 -- ================================================================
--- SEED DATA — CARS (matches in-memory data)
+-- SEED DATA — CARS
 -- ================================================================
 INSERT INTO cars (make, model, year, color, price, mileage, condition, status, branch, fuel_type, transmission, engine, features) VALUES
 ('Toyota',  'Camry',        2024, 'أبيض لؤلؤي', 18500, 0,     'new',  'available', 'عمان',    'بنزين', 'أوتوماتيك', '2.5L',        'كاميرا خلفية، شاشة لمس، كروز كنترول، نظام ملاحة'),
@@ -235,8 +239,7 @@ INSERT INTO cars (make, model, year, color, price, mileage, condition, status, b
 ('Nissan',  'Sunny',        2024, 'أبيض',        9800, 0,     'new',  'available', 'العقبة',  'بنزين', 'أوتوماتيك', '1.5L',        'مكيف، بلوتوث، كاميرا خلفية'),
 ('Nissan',  'Altima',       2023, 'أسود',       16500, 22000, 'used', 'available', 'عمان',    'بنزين', 'أوتوماتيك', '2.5L',        'كروز، كاميرا خلفية، شاشة لمس'),
 ('BMW',     '320i',         2022, 'أبيض',       32000, 28000, 'used', 'available', 'عمان',    'بنزين', 'أوتوماتيك', '2.0T',        'فل أوبشن، نظام ملاحة، جلد'),
-('Chery',   'Tiggo 8 Pro',  2024, 'أبيض',       14800, 0,     'new',  'available', 'إربد',    'بنزين', 'أوتوماتيك', '1.6T',        '7 مقاعد، بانورامك، شاشة كبيرة')
-ON CONFLICT DO NOTHING;
+('Chery',   'Tiggo 8 Pro',  2024, 'أبيض',       14800, 0,     'new',  'available', 'إربد',    'بنزين', 'أوتوماتيك', '1.6T',        '7 مقاعد، بانورامك، شاشة كبيرة');
 
 -- ================================================================
 -- SEED DATA — PARTS
@@ -260,8 +263,7 @@ INSERT INTO parts (name, part_number, category, price, quantity, min_quantity, l
 ('شمعات NGK (طقم)',      'SPK-NGK-001',  'شمعات',    22,  25, 8,  'رف E1', ARRAY['Toyota Camry','Toyota Corolla','Nissan Sunny']),
 ('شمعات بوش (طقم)',      'SPK-BSH-001',  'شمعات',    28,  15, 6,  'رف E2', ARRAY['Hyundai Tucson','Kia Sportage','BMW 320i']),
 ('زيت محرك 5W-30 (4L)',  'OIL-5W30-4L',  'زيوت',     18,  60, 15, 'رف F1', ARRAY['جميع السيارات']),
-('زيت محرك 0W-20 (4L)',  'OIL-0W20-4L',  'زيوت',     24,  30, 10, 'رف F2', ARRAY['Toyota Camry 2020+','Toyota RAV4 Hybrid'])
-ON CONFLICT DO NOTHING;
+('زيت محرك 0W-20 (4L)',  'OIL-0W20-4L',  'زيوت',     24,  30, 10, 'رف F2', ARRAY['Toyota Camry 2020+','Toyota RAV4 Hybrid']);
 
 -- ================================================================
 -- SEED DATA — PROMOTIONS
@@ -270,12 +272,11 @@ INSERT INTO promotions (title, description, applies_to, valid_until, active) VAL
 ('عرض رمضان الكريم 🌙',     'خصم 500 دينار على جميع السيارات الجديدة + 3 سنوات كفالة مجانية', 'جميع السيارات الجديدة', '2026-04-30', true),
 ('عرض فحص مجاني',          'فحص شامل مجاني 21 نقطة مع كل موعد صيانة',                         'جميع العملاء',          '2026-06-30', true),
 ('تقسيط بدون فوائد',       'تقسيط حتى 60 شهراً بدون فوائد على سيارات MG و Chery',              'MG & Chery',            '2026-05-31', true),
-('استبدال سيارتك القديمة', 'نشتري سيارتك القديمة بأفضل سعر ونستبدلها بجديدة',                 'جميع العملاء',          '2026-12-31', true)
-ON CONFLICT DO NOTHING;
+('استبدال سيارتك القديمة', 'نشتري سيارتك القديمة بأفضل سعر ونستبدلها بجديدة',                 'جميع العملاء',          '2026-12-31', true);
 
 -- ================================================================
--- DONE — verify by running:
---   SELECT COUNT(*) FROM cars;            -- expect 17
---   SELECT COUNT(*) FROM parts;           -- expect 19
---   SELECT COUNT(*) FROM promotions;      -- expect 4
+-- DONE — verify with:
+--   SELECT COUNT(*) FROM cars;         -- expect 17
+--   SELECT COUNT(*) FROM parts;        -- expect 19
+--   SELECT COUNT(*) FROM promotions;   -- expect 4
 -- ================================================================
