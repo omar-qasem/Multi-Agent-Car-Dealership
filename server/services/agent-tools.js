@@ -53,25 +53,24 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'book_maintenance',
-      description: 'حجز موعد صيانة لعميل. استخدم هذه الأداة لما العميل يريد يحجز موعد صيانة. تأكد من جمع كل المعلومات المطلوبة قبل الحجز.',
+      description: 'حجز موعد صيانة لعميل. استخدمها فور ما يتأكد قصد الحجز وتتوفر خدمة + تاريخ. باقي الحقول اختيارية وتُجمَع عبر محادثة لاحقة أو يُستخدَم default. preferred_date يقبل نص طبيعي مثل "بكرا" أو "الاثنين الجاي" أو "2026-04-14".',
       parameters: {
         type: 'object',
         properties: {
-          customer_name: { type: 'string', description: 'اسم العميل' },
-          car_make: { type: 'string', description: 'ماركة السيارة' },
+          customer_name: { type: 'string', description: 'اسم العميل (اختياري - لو ما ذكره استخدم رقمه)' },
+          car_make: { type: 'string', description: 'ماركة السيارة مثل Toyota أو Hyundai' },
           car_model: { type: 'string', description: 'موديل السيارة' },
           car_year: { type: 'number', description: 'سنة السيارة' },
           service_type: {
             type: 'string',
-            enum: ['تغيير زيت', 'صيانة دورية', 'فحص شامل', 'إطارات', 'بريك', 'كهربائي', 'تبريد', 'أخرى'],
-            description: 'نوع الخدمة المطلوبة'
+            description: 'نوع الخدمة: تغيير زيت، صيانة دورية، فحص شامل، إطارات، بريك، كهربائي، تبريد، أو أخرى'
           },
-          preferred_date: { type: 'string', description: 'التاريخ المفضل (مثال: 2026-04-01)' },
-          preferred_time: { type: 'string', description: 'الوقت المفضل (مثال: 10:00 صباحاً)' },
-          branch: { type: 'string', description: 'الفرع المفضل: عمان، إربد، الزرقاء، العقبة' },
+          preferred_date: { type: 'string', description: 'التاريخ المفضل — نص طبيعي أو ISO (مثل "الاثنين 10 الصبح" أو 2026-04-14)' },
+          preferred_time: { type: 'string', description: 'الوقت المفضل' },
+          branch: { type: 'string', description: 'الفرع: عمان، إربد، الزرقاء، العقبة' },
           notes: { type: 'string', description: 'ملاحظات إضافية' },
         },
-        required: ['customer_name', 'car_make', 'car_model', 'service_type', 'preferred_date'],
+        required: ['service_type', 'preferred_date'],
       },
     },
   },
@@ -112,15 +111,15 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'submit_support_ticket',
-      description: 'إنشاء تذكرة دعم وتحويل العميل لموظف بشري. استخدم هذه الأداة إذا طلب العميل التحدث مع شخص حقيقي أو إذا كانت المشكلة معقدة.',
+      description: 'إنشاء تذكرة دعم وتحويل العميل لموظف بشري. استدعها فور ما يطلب العميل التحدث مع شخص حقيقي أو تفشل المعالجة الذكية.',
       parameters: {
         type: 'object',
         properties: {
-          customer_name: { type: 'string', description: 'اسم العميل' },
-          issue_description: { type: 'string', description: 'وصف المشكلة أو الطلب' },
+          customer_name: { type: 'string', description: 'اسم العميل (اختياري)' },
+          issue_description: { type: 'string', description: 'وصف مختصر للطلب أو المشكلة' },
           priority: { type: 'string', enum: ['low', 'medium', 'high'], description: 'أولوية التذكرة' },
         },
-        required: ['customer_name', 'issue_description'],
+        required: ['issue_description'],
       },
     },
   },
@@ -129,17 +128,17 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'create_purchase_inquiry',
-      description: 'تسجيل استفسار شراء سيارة من عميل مهتم.',
+      description: 'تسجيل استفسار شراء سيارة من عميل مهتم. استدعها فور ما يُبدي العميل اهتمام جدي بشراء حتى لو كانت المعلومات غير مكتملة.',
       parameters: {
         type: 'object',
         properties: {
-          customer_name: { type: 'string', description: 'اسم العميل' },
-          car_make: { type: 'string', description: 'ماركة السيارة المطلوبة' },
-          car_model: { type: 'string', description: 'موديل السيارة المطلوبة' },
-          budget: { type: 'number', description: 'الميزانية بالدينار الأردني' },
+          customer_name: { type: 'string', description: 'اسم العميل (اختياري)' },
+          car_make: { type: 'string', description: 'ماركة السيارة المطلوبة (اختياري)' },
+          car_model: { type: 'string', description: 'موديل السيارة المطلوبة (اختياري)' },
+          budget: { type: 'number', description: 'الميزانية بالدينار الأردني (اختياري)' },
           notes: { type: 'string', description: 'ملاحظات إضافية عن المواصفات المطلوبة' },
         },
-        required: ['customer_name'],
+        required: [],
       },
     },
   },
@@ -260,23 +259,28 @@ async function executeTool(toolName, args, customerPhone) {
       }
 
       case 'book_maintenance': {
+        // Fallback: use phone as customer_name placeholder if missing
+        const customerName = args.customer_name || `عميل ${customerPhone.slice(-4)}`;
+        const carMake    = args.car_make  || 'غير محدد';
+        const carModel   = args.car_model || 'غير محدد';
+
         await db.upsertCustomer(customerPhone, {
-          name: args.customer_name,
-          car_make: args.car_make,
-          car_model: args.car_model,
+          name: customerName,
+          car_make: carMake,
+          car_model: carModel,
         });
 
         const booking = await db.createBooking({
-          customer_phone: customerPhone,
-          customer_name: args.customer_name,
-          car_make: args.car_make,
-          car_model: args.car_model,
-          car_year: args.car_year,
-          service_type: args.service_type,
-          preferred_date: args.preferred_date,
-          preferred_time: args.preferred_time || '9:00 صباحاً',
-          branch: args.branch || 'عمان',
-          notes: args.notes || '',
+          customer_phone:  customerPhone,
+          customer_name:   customerName,
+          car_make:        carMake,
+          car_model:       carModel,
+          car_year:        args.car_year || null,
+          service_type:    args.service_type,
+          preferred_date:  args.preferred_date,
+          preferred_time:  args.preferred_time || '9:00 صباحاً',
+          branch:          args.branch || 'عمان',
+          notes:           args.notes || '',
         });
 
         return {
@@ -285,12 +289,18 @@ async function executeTool(toolName, args, customerPhone) {
           message: 'تم الحجز بنجاح! سيتصل بكم فريقنا خلال ساعات لتأكيد الموعد.',
           details: {
             booking_id: booking.id,
-            service: booking.service_type,
-            date: booking.preferred_date,
-            time: booking.preferred_time,
-            branch: booking.branch,
-            car: `${booking.car_make} ${booking.car_model}`,
+            service:    booking.service_type,
+            date:       booking.preferred_date,
+            time:       booking.preferred_time,
+            branch:     booking.branch,
+            car:        `${booking.car_make} ${booking.car_model}`,
           },
+          // Hint to AI: if any of these came back as "غير محدد", ask customer for them now
+          missing_info: [
+            !args.customer_name && 'الاسم',
+            !args.car_make && 'ماركة السيارة',
+            !args.car_model && 'موديل السيارة',
+          ].filter(Boolean),
         };
       }
 
@@ -331,13 +341,14 @@ async function executeTool(toolName, args, customerPhone) {
       }
 
       case 'submit_support_ticket': {
-        await db.upsertCustomer(customerPhone, { name: args.customer_name });
+        const customerName = args.customer_name || `عميل ${customerPhone.slice(-4)}`;
+        await db.upsertCustomer(customerPhone, { name: customerName });
 
         const ticket = await db.createTicket({
-          customer_phone: customerPhone,
-          customer_name: args.customer_name,
+          customer_phone:    customerPhone,
+          customer_name:     customerName,
           issue_description: args.issue_description,
-          priority: args.priority || 'medium',
+          priority:          args.priority || 'medium',
         });
 
         return {
@@ -349,15 +360,16 @@ async function executeTool(toolName, args, customerPhone) {
       }
 
       case 'create_purchase_inquiry': {
-        await db.upsertCustomer(customerPhone, { name: args.customer_name });
+        const customerName = args.customer_name || `عميل ${customerPhone.slice(-4)}`;
+        await db.upsertCustomer(customerPhone, { name: customerName });
 
         const inquiry = await db.createInquiry({
           customer_phone: customerPhone,
-          customer_name: args.customer_name,
-          car_make: args.car_make || '',
-          car_model: args.car_model || '',
-          budget: args.budget || null,
-          notes: args.notes || '',
+          customer_name:  customerName,
+          car_make:       args.car_make || '',
+          car_model:      args.car_model || '',
+          budget:         args.budget || null,
+          notes:          args.notes || '',
         });
 
         return {

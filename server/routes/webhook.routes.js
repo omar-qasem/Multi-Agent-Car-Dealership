@@ -31,6 +31,43 @@ const PHONE_REGEX = /^\+?[1-9]\d{7,14}$/;
 const isValidPhone = (phone) => typeof phone === 'string' && PHONE_REGEX.test(phone);
 
 // =============================================
+// Message ID Deduplication
+// =============================================
+// Meta/WhatsApp retries the webhook if it doesn't receive 200 in ~5s.
+// Even though we now respond instantly, network blips can still cause
+// duplicate deliveries. We keep a short-lived Set of processed message IDs
+// and silently drop any repeat we've already handled.
+//
+// Memory-safe: hard-capped at MAX_SEEN entries + TTL eviction.
+// Note: in serverless (Netlify) this resets per cold start, which is fine
+// because WhatsApp retry windows are measured in seconds, not hours.
+const SEEN_MESSAGE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_SEEN_MESSAGES   = 5000;
+const seenMessageIds = new Map(); // messageId → timestamp
+
+function isDuplicateMessage(messageId) {
+    if (!messageId) return false;
+
+    // Evict stale entries (cheap: only scans while over capacity)
+    if (seenMessageIds.size > MAX_SEEN_MESSAGES) {
+        const cutoff = Date.now() - SEEN_MESSAGE_TTL_MS;
+        for (const [id, ts] of seenMessageIds) {
+            if (ts < cutoff) seenMessageIds.delete(id);
+            if (seenMessageIds.size <= MAX_SEEN_MESSAGES * 0.9) break;
+        }
+        // Hard cap: if still over, drop oldest (Map preserves insertion order)
+        while (seenMessageIds.size > MAX_SEEN_MESSAGES) {
+            const oldest = seenMessageIds.keys().next().value;
+            seenMessageIds.delete(oldest);
+        }
+    }
+
+    if (seenMessageIds.has(messageId)) return true;
+    seenMessageIds.set(messageId, Date.now());
+    return false;
+}
+
+// =============================================
 // GET /webhook — Meta Webhook Verification
 // =============================================
 router.get('/', (req, res) => {
@@ -66,6 +103,12 @@ router.post('/', (req, res) => {
     }
     if (checkBlacklist(message.from)) {
         logger.info(`🚫 رقم محظور: ${message.from}`);
+        return;
+    }
+
+    // ── Deduplication: drop any messageId we already handled ──────
+    if (isDuplicateMessage(message.id)) {
+        logger.info(`🔁 Duplicate webhook ignored: ${message.id}`);
         return;
     }
 
