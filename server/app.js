@@ -12,11 +12,15 @@ const path = require('path');
 const config = require('./config/env');
 const logger = require('./utils/logger');
 const { apiRateLimit, webhookRateLimit, login, loginRateLimit } = require('./middleware/auth');
-const { initDatabase } = require('./database/db');
+const db = require('./database/db');
+const { initDatabase, getDbMode } = db;
 
 // Initialize Database (async — runs in background, doesn't block app startup)
 initDatabase()
-    .then(() => logger.info('🚗 أوتو جوردن - قاعدة البيانات جاهزة'))
+    .then(() => {
+        const mode = getDbMode();
+        logger.info(`🚗 أوتو جوردن - قاعدة البيانات جاهزة (mode=${mode.mode}, persistent=${mode.persistent})`);
+    })
     .catch(error => logger.error('❌ فشل تهيئة قاعدة البيانات:', error));
 
 // Routes
@@ -72,32 +76,53 @@ if (config.server.nodeEnv !== 'test') {
 // Routes
 // ==========================================
 
-// Health Check
-app.get('/health', (req, res) => {
+// Health Check — reflects REAL runtime state, not just presence of env vars
+app.get('/health', async (req, res) => {
+    const mode = getDbMode();
+
+    // Live ping: actually hit Supabase to confirm schema is reachable right now
+    let supabaseLive = null;
+    let supabaseError = null;
+    if (mode.mode === 'supabase') {
+        try {
+            const cars = await db.searchCars({});
+            supabaseLive = { ok: true, sample_car_count: cars.length };
+        } catch (e) {
+            supabaseLive = { ok: false };
+            supabaseError = e.message;
+        }
+    }
+
     res.json({
-        status: 'ok',
+        status: supabaseLive?.ok === false ? 'degraded' : 'ok',
         name: 'أوتو جوردن - Auto Jordan',
         timestamp: new Date().toISOString(),
         uptime: typeof process !== 'undefined' ? process.uptime() : 0,
-        version: '6.0.0',
-        storage: process.env.SUPABASE_URL ? 'Supabase (PostgreSQL)' : 'In-Memory (fallback)',
-        supabase: !!process.env.SUPABASE_URL,
-        features: ['AI Agent', '12 Tools', 'Car Inventory', 'Parts Inventory', 'Booking', 'Tickets', 'Inquiries', 'Supabase'],
+        version: '6.1.0',
+        database: {
+            mode: mode.mode,             // 'supabase' | 'in-memory'
+            persistent: mode.persistent, // true | false
+            live_check: supabaseLive,    // null if in-memory, object if supabase
+            live_error: supabaseError,
+        },
+        features: ['AI Agent', '12 Tools', 'Car Inventory', 'Parts Inventory', 'Booking', 'Tickets', 'Inquiries'],
     });
 });
 
 // Debug endpoint
 app.get('/debug-env', (req, res) => {
+    const mode = getDbMode();
     res.json({
-        VERIFY_TOKEN_SET: !!process.env.WHATSAPP_VERIFY_TOKEN,
-        WHATSAPP_TOKEN_SET: !!process.env.WHATSAPP_TOKEN,
-        GROQ_KEY_SET: !!process.env.GROQ_API_KEY,
-        GROQ_MODEL: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-        NODE_ENV: process.env.NODE_ENV,
-        IS_NETLIFY: !!process.env.NETLIFY,
-        SUPABASE_URL_SET: !!process.env.SUPABASE_URL,
-        SUPABASE_KEY_SET: !!process.env.SUPABASE_SERVICE_KEY,
-        DB_STORAGE: process.env.SUPABASE_URL ? 'Supabase' : 'In-Memory',
+        VERIFY_TOKEN_SET:   !!process.env.WHATSAPP_VERIFY_TOKEN,
+        WHATSAPP_TOKEN_SET: !!process.env.WHATSAPP_ACCESS_TOKEN || !!process.env.WHATSAPP_TOKEN,
+        GROQ_KEY_SET:       !!process.env.GROQ_API_KEY,
+        GROQ_MODEL:         process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+        NODE_ENV:           process.env.NODE_ENV,
+        IS_NETLIFY:         !!process.env.NETLIFY,
+        SUPABASE_URL_SET:   !!process.env.SUPABASE_URL,
+        SUPABASE_KEY_SET:   !!process.env.SUPABASE_SERVICE_KEY,
+        DB_MODE:            mode.mode,         // real mode, not just env-var presence
+        DB_PERSISTENT:      mode.persistent,
     });
 });
 

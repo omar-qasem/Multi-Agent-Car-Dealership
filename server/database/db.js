@@ -151,22 +151,56 @@ function sbThrow(operation, error) {
 // =============================================
 // Initialize Database
 // =============================================
+// IMPORTANT: When Supabase env vars are set, we NEVER silently fall back
+// to in-memory. A connection or schema failure at this point is always a
+// deployment issue (missing schema, wrong key, wrong project URL) and
+// hiding it would cause data-loss bugs identical to the ones the v2
+// rewrite was supposed to fix. We log a big, obvious banner and keep
+// useSupabase=true so every subsequent call throws with a clear error.
 async function initDatabase() {
   if (useSupabase) {
     const { error } = await supabase.from('cars').select('id').limit(1);
     if (error) {
-      console.error('[DB] ❌ Supabase connection test failed:', error.message);
-      console.error('[DB] ❌ Did you run server/database/supabase-schema.sql in the Supabase SQL Editor?');
-      console.error('[DB] ⚠️  Continuing with in-memory fallback — data will not persist.');
-      useSupabase = false;
-      seedMemory();
-    } else {
-      console.log('[DB] ✅ Supabase schema ready');
+      console.error('');
+      console.error('╔══════════════════════════════════════════════════════════════════╗');
+      console.error('║  ❌ SUPABASE SCHEMA CHECK FAILED — DEPLOYMENT NOT READY          ║');
+      console.error('╠══════════════════════════════════════════════════════════════════╣');
+      console.error('║  The "cars" table is missing or unreachable.                     ║');
+      console.error('║                                                                  ║');
+      console.error('║  FIX (one-time):                                                 ║');
+      console.error('║    1. Open https://supabase.com/dashboard                        ║');
+      console.error('║    2. Select your project  →  SQL Editor  →  New query          ║');
+      console.error('║    3. Paste the contents of                                      ║');
+      console.error('║       server/database/supabase-schema.sql                        ║');
+      console.error('║    4. Run the query.  All 8 tables will be created.              ║');
+      console.error('║                                                                  ║');
+      console.error('║  Also check:                                                     ║');
+      console.error('║    • SUPABASE_URL points to the right project                    ║');
+      console.error('║    • SUPABASE_SERVICE_KEY is the service_role key (not anon)    ║');
+      console.error('╚══════════════════════════════════════════════════════════════════╝');
+      console.error('');
+      console.error('[DB] Supabase error detail:', error.message, error.details || '', error.hint || '');
+      console.error('[DB] Every DB call will now throw until this is fixed. NO silent fallback.');
+      // DO NOT set useSupabase = false. DO NOT call seedMemory().
+      // Callers must see the real error, not fake success.
+      return;
     }
-  } else {
-    seedMemory();
-    console.log(`[DB] 🚗 In-memory: ${mem.cars.length} cars | 🔧 ${mem.parts.length} parts | 🎯 ${mem.promotions.length} promotions`);
+    console.log('[DB] ✅ Supabase schema ready — persistent mode active');
+    return;
   }
+
+  // Env vars not set at all → dev mode with in-memory seed data.
+  seedMemory();
+  console.log(`[DB] 🚗 In-memory dev mode: ${mem.cars.length} cars | 🔧 ${mem.parts.length} parts | 🎯 ${mem.promotions.length} promotions`);
+  console.log('[DB] ⚠️  Set SUPABASE_URL and SUPABASE_SERVICE_KEY for production persistence.');
+}
+
+// =============================================
+// Health check helper — exposed for /health endpoint & dashboard
+// =============================================
+function getDbMode() {
+  if (!useSupabase) return { mode: 'in-memory', persistent: false };
+  return { mode: 'supabase', persistent: true };
 }
 
 // =============================================
@@ -986,6 +1020,7 @@ function getDb() {
 // =============================================
 module.exports = {
   initDatabase,
+  getDbMode,
   // Cars
   searchCars,
   getCarById,
