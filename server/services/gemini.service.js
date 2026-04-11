@@ -6,6 +6,7 @@
 const Groq = require('groq-sdk');
 const logger = require('../utils/logger');
 const { TOOL_DEFINITIONS, executeTool } = require('./agent-tools');
+const db = require('../database/db');
 
 // =============================================
 // System Prompt — مختصر ومركّز للسرعة
@@ -110,18 +111,22 @@ class GeminiService {
         try {
             if (!this.client) return this._fallbackResponse(userMessage, startTime);
 
-            // ── Conversation History (LRU) ──────────────────────────
-            if (!this.conversationHistory.has(phoneNumber)) {
-                this._evictOldestIfFull();
-                this.conversationHistory.set(phoneNumber, []);
-            } else {
-                // Re-insert to move to end (LRU touch)
-                const existing = this.conversationHistory.get(phoneNumber);
-                this.conversationHistory.delete(phoneNumber);
-                this.conversationHistory.set(phoneNumber, existing);
+            // ── Load persisted conversation state from Supabase ─────
+            // Falls back to in-memory Map if Supabase is unavailable.
+            let history = [];
+            let convState = null;
+            try {
+                convState = await db.getConversationState(phoneNumber);
+                if (convState?.history && Array.isArray(convState.history)) {
+                    history = convState.history.slice(); // copy
+                }
+            } catch (e) {
+                logger.warn(`⚠️ getConversationState failed (using empty history): ${e.message}`);
             }
+
+            // Mirror to in-memory Map for hot-path reads in same instance
+            this.conversationHistory.set(phoneNumber, history);
             this.conversationLastAccess.set(phoneNumber, Date.now());
-            const history = this.conversationHistory.get(phoneNumber);
 
             // Add user message
             history.push({ role: 'user', content: userMessage });
@@ -199,11 +204,38 @@ class GeminiService {
 
             const aiText = assistantMessage.content || 'عذراً، صار مشكلة. جرب مرة ثانية.';
 
-            // Save assistant reply to history
+            // Save assistant reply to history.
+            // We persist ONLY the final text-only assistant message, NOT the
+            // intermediate tool-calling steps. This keeps the JSONB row small
+            // and avoids re-running tool loops on the next turn (the model only
+            // needs the conversational turns to maintain context, not the
+            // mechanical tool plumbing — tool results are stale anyway).
             history.push({ role: 'assistant', content: aiText });
+            while (history.length > this.maxHistory) history.shift();
+
+            // ── Persist updated state to Supabase ───────────────────
+            // Detect tool success → clear pending intent (booking confirmed etc.)
+            const completedTools = new Set([
+                'book_maintenance',
+                'submit_support_ticket',
+                'create_purchase_inquiry',
+            ]);
+            const toolCompleted = toolsUsed.some(t => completedTools.has(t));
+
+            const newTurnCount = (convState?.turn_count || 0) + 1;
+            try {
+                await db.saveConversationState(phoneNumber, {
+                    history,
+                    pending_intent:     toolCompleted ? null : (convState?.pending_intent || null),
+                    collected_entities: toolCompleted ? {} : (convState?.collected_entities || {}),
+                    turn_count:         newTurnCount,
+                });
+            } catch (e) {
+                logger.warn(`⚠️ saveConversationState failed (continuing): ${e.message}`);
+            }
 
             const responseTime = Date.now() - startTime;
-            logger.info(`✅ AI: ${responseTime}ms | أدوات: ${toolCallCount} [${toolsUsed.join(', ')}]`);
+            logger.info(`✅ AI: ${responseTime}ms | أدوات: ${toolCallCount} [${toolsUsed.join(', ')}] | turn=${newTurnCount}`);
 
             return {
                 response: aiText,
@@ -248,9 +280,14 @@ class GeminiService {
         };
     }
 
-    clearHistory(phoneNumber) {
+    async clearHistory(phoneNumber) {
         this.conversationHistory.delete(phoneNumber);
         this.conversationLastAccess.delete(phoneNumber);
+        try {
+            await db.clearConversationState(phoneNumber);
+        } catch (e) {
+            logger.warn(`clearConversationState failed: ${e.message}`);
+        }
     }
 
     getHistory(phoneNumber) {

@@ -1008,6 +1008,92 @@ async function getActivePromotions() {
   return mem.promotions.filter(p => p.active !== false && (!p.valid_until || p.valid_until >= today));
 }
 
+// =============================================
+// CONVERSATION STATES
+// (multi-turn context that survives Netlify cold starts)
+// =============================================
+// In-memory fallback for dev mode only
+const memConvStates = new Map();
+
+/**
+ * Load the persisted conversation state for a phone number.
+ * Returns null if no state exists yet.
+ *
+ * Shape:
+ *   {
+ *     phone_number: string,
+ *     history: [{role: 'user'|'assistant', content: string}, ...],
+ *     pending_intent: string | null,
+ *     collected_entities: object,
+ *     turn_count: number,
+ *     last_active: string ISO,
+ *   }
+ */
+async function getConversationState(phoneNumber) {
+  if (!phoneNumber) return null;
+
+  if (useSupabase) {
+    const { data, error } = await supabase
+      .from('conversation_states')
+      .select('*')
+      .eq('phone_number', phoneNumber)
+      .maybeSingle();
+    if (error) sbThrow('getConversationState', error);
+    return data || null;
+  }
+  return memConvStates.get(phoneNumber) || null;
+}
+
+/**
+ * Upsert the conversation state. Always updates last_active to NOW().
+ *
+ * @param {string} phoneNumber
+ * @param {object} state — { history?, pending_intent?, collected_entities?, turn_count? }
+ */
+async function saveConversationState(phoneNumber, state) {
+  if (!phoneNumber) return;
+
+  const payload = {
+    phone_number:       phoneNumber,
+    history:            Array.isArray(state.history) ? state.history : [],
+    pending_intent:     state.pending_intent || null,
+    collected_entities: state.collected_entities && typeof state.collected_entities === 'object' ? state.collected_entities : {},
+    turn_count:         Number.isFinite(state.turn_count) ? state.turn_count : 0,
+    last_active:        new Date().toISOString(),
+  };
+
+  if (useSupabase) {
+    const { error } = await supabase
+      .from('conversation_states')
+      .upsert(payload, { onConflict: 'phone_number' });
+    if (error) sbThrow('saveConversationState', error);
+    return;
+  }
+
+  // In-memory fallback
+  const existing = memConvStates.get(phoneNumber) || {};
+  memConvStates.set(phoneNumber, { ...existing, ...payload, created_at: existing.created_at || new Date().toISOString() });
+}
+
+/**
+ * Clear conversation state — used after a tool successfully executes
+ * (booking confirmed, ticket created, etc.) so the next message starts
+ * a fresh interaction.
+ */
+async function clearConversationState(phoneNumber) {
+  if (!phoneNumber) return;
+
+  if (useSupabase) {
+    const { error } = await supabase
+      .from('conversation_states')
+      .delete()
+      .eq('phone_number', phoneNumber);
+    if (error) sbThrow('clearConversationState', error);
+    return;
+  }
+  memConvStates.delete(phoneNumber);
+}
+
 // Legacy compatibility shim (no sqlite in serverless anymore)
 function getDb() {
   return {
@@ -1056,6 +1142,10 @@ module.exports = {
   getConversations,
   getConversationsByPhone,
   getGroupedConversations,
+  // Conversation States (multi-turn context)
+  getConversationState,
+  saveConversationState,
+  clearConversationState,
   // Analytics & Stats
   getLiveStats,
   getStats,
