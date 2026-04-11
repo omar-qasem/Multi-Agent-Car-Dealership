@@ -1,7 +1,16 @@
 /**
- * أوتو جوردن - Webhook Routes
- * استقبال رسائل واتساب ومعالجتها مع الوكيل الذكي
- * All db calls are await'd — data persists to Supabase
+ * أوتو جوردن - Webhook Routes (Speed-Optimised)
+ *
+ * Flow:
+ *   1. Parse & validate incoming message  ← sync, <1ms
+ *   2. Return HTTP 200 to Meta immediately ← before ANY async work
+ *   3. Fire-and-forget processMessage()   ← runs in background via setImmediate
+ *
+ * Why setImmediate?
+ *   Express/Node won't close the TCP connection just because res.json() was called.
+ *   setImmediate defers processing until after the current I/O cycle so the HTTP
+ *   response is flushed before we start the heavy AI work.  Netlify Lambda keeps
+ *   the function alive until the JS event loop is empty, so background work completes.
  */
 
 const express = require('express');
@@ -18,141 +27,141 @@ if (!VERIFY_TOKEN) {
     logger.error('❌ WHATSAPP_VERIFY_TOKEN not set — webhook verification will fail');
 }
 
-// E.164 phone number format validation
 const PHONE_REGEX = /^\+?[1-9]\d{7,14}$/;
 const isValidPhone = (phone) => typeof phone === 'string' && PHONE_REGEX.test(phone);
 
-/**
- * GET /webhook - التحقق من الـ Webhook
- */
+// =============================================
+// GET /webhook — Meta Webhook Verification
+// =============================================
 router.get('/', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    console.log('[WEBHOOK VERIFY]', { mode, token, expectedToken: VERIFY_TOKEN, match: token === VERIFY_TOKEN });
+    const { 'hub.mode': mode, 'hub.verify_token': token, 'hub.challenge': challenge } = req.query;
+    logger.info('[WEBHOOK VERIFY]', { mode, match: token === VERIFY_TOKEN });
 
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-        console.log('✅ Webhook verified successfully!');
-        res.setHeader('Content-Type', 'text/plain');
-        return res.status(200).send(challenge);
+        logger.success('✅ Webhook verified!');
+        return res.status(200).type('text').send(challenge);
     }
-
-    console.log('❌ Webhook verification FAILED');
+    logger.error('❌ Webhook verification FAILED');
     return res.status(403).send('Forbidden');
 });
 
-/**
- * POST /webhook - استقبال الرسائل الواردة
- */
-router.post('/', async (req, res) => {
-    // Always respond 200 immediately so Meta doesn't retry
+// =============================================
+// POST /webhook — Incoming WhatsApp Messages
+// =============================================
+router.post('/', (req, res) => {
+    // ── Step 1: Respond 200 to Meta immediately (sync, no await) ──
     res.status(200).json({ status: 'ok' });
 
     const body = req.body;
     if (body?.object !== 'whatsapp_business_account') return;
 
+    // ── Step 2: Quick parse (sync) ─────────────────────────────────
+    const message = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const contact = body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
+
+    if (!message || message.type !== 'text') return;
+    if (!isValidPhone(message.from)) {
+        logger.warn(`🚫 رقم غير صالح: ${message.from}`);
+        return;
+    }
+    if (checkBlacklist(message.from)) {
+        logger.info(`🚫 رقم محظور: ${message.from}`);
+        return;
+    }
+
+    const incoming = {
+        messageId: message.id,
+        from:      message.from,
+        timestamp: new Date(parseInt(message.timestamp) * 1000).toISOString(),
+        text:      message.text?.body || '',
+        name:      contact?.profile?.name || message.from,
+    };
+
+    logger.webhook('📩 رسالة واردة', {
+        from: incoming.from,
+        name: incoming.name,
+        text: incoming.text.substring(0, 60),
+    });
+
+    // ── Step 3: Fire-and-forget background processing ──────────────
+    // setImmediate defers until AFTER the HTTP response is flushed
+    setImmediate(() => {
+        processMessage(incoming).catch(err =>
+            logger.error('❌ Background processMessage error:', err.message)
+        );
+    });
+});
+
+// =============================================
+// Background Message Processor
+// =============================================
+async function processMessage(incoming) {
+    const start = Date.now();
+
     try {
-        const entry = body?.entry?.[0];
-        const changes = entry?.changes?.[0];
-        const value = changes?.value;
+        // Run sentiment analysis + mark-as-read + customer lookup IN PARALLEL
+        const [sentimentResult, , customer] = await Promise.all([
+            Promise.resolve(analyzeSentiment(incoming.text)),                 // sync wrapped for consistency
+            whatsappService.markAsRead(incoming.messageId)
+                .catch(e => logger.warn('markAsRead failed:', e.message)),    // non-critical
+            db.getOrCreateCustomer(incoming.from, incoming.name),
+        ]);
 
-        if (!value?.messages) return;
+        const topic  = detectTopic(incoming.text);   // sync
+        const intent = detectIntent(incoming.text);  // sync
 
-        const message = value.messages[0];
-        const contact = value.contacts?.[0];
-
-        if (message.type !== 'text') return;
-
-        // Phone number validation (E.164)
-        if (!isValidPhone(message.from)) {
-            logger.warn(`🚫 رقم هاتف بصيغة غير صالحة: ${message.from}`);
-            return;
-        }
-
-        const incomingMessage = {
-            messageId: message.id,
-            from: message.from,
-            timestamp: new Date(parseInt(message.timestamp) * 1000).toISOString(),
-            text: message.text?.body || '',
-            name: contact?.profile?.name || message.from,
-        };
-
-        logger.webhook('📩 رسالة واردة', {
-            from: incomingMessage.from,
-            name: incomingMessage.name,
-            text: incomingMessage.text.substring(0, 60),
-        });
-
-        // التحقق من القائمة السوداء
-        if (checkBlacklist(incomingMessage.from)) {
-            logger.info(`🚫 رقم محظور: ${incomingMessage.from}`);
-            return;
-        }
-
-        // تحديد حالة القراءة (non-critical)
-        whatsappService.markAsRead(incomingMessage.messageId)
-            .catch(err => logger.warn('markAsRead failed:', err.message));
-
-        // تحليل المشاعر والموضوع والنية
-        const sentimentResult = analyzeSentiment(incomingMessage.text);
-        const topic = detectTopic(incomingMessage.text);
-        const intent = detectIntent(incomingMessage.text);
-
-        // Get or create customer — await now
-        const customer = await db.getOrCreateCustomer(incomingMessage.from, incomingMessage.name);
-
-        // توليد الرد من AI مع الأدوات
+        // Generate AI response (the slow part)
         const aiResult = await geminiService.generateResponse(
-            incomingMessage.from,
-            incomingMessage.text,
-            incomingMessage.name
+            incoming.from,
+            incoming.text,
+            incoming.name
         );
 
-        // إرسال الرد على واتساب
-        await whatsappService.sendTextMessage(incomingMessage.from, aiResult.response);
+        // Send WhatsApp reply + save to DB IN PARALLEL (no dependency between them)
+        await Promise.all([
+            whatsappService.sendTextMessage(incoming.from, aiResult.response),
+            db.saveConversation({
+                phone_number:     incoming.from,
+                customer_id:      customer?.id || null,
+                customer_name:    incoming.name,
+                customer_message: incoming.text,
+                ai_response:      aiResult.response,
+                response_time:    aiResult.responseTime,
+                sentiment:        sentimentResult.label,
+                topic,
+                intent,
+                tools_used:       aiResult.toolsUsed || [],
+                escalated:        aiResult.escalated || false,
+                message_id:       incoming.messageId,
+                status:           'delivered',
+            }),
+        ]);
 
-        // تسجيل المحادثة في Supabase — await now
-        await db.saveConversation({
-            phone_number: incomingMessage.from,
-            customer_id: customer ? customer.id : null,
-            customer_name: incomingMessage.name,
-            customer_message: incomingMessage.text,
-            ai_response: aiResult.response,
-            response_time: aiResult.responseTime,
-            sentiment: sentimentResult.label,
-            topic,
-            intent,
-            tools_used: aiResult.toolsUsed || [],
-            escalated: aiResult.escalated || false,
-            message_id: incomingMessage.messageId,
-            status: 'delivered',
-        });
-
-        // Update customer loyalty points (non-critical)
-        if (customer) {
+        // Loyalty points — fire-and-forget (non-critical)
+        if (customer?.id) {
             db.updateCustomerLoyalty(customer.id, 1)
-                .catch(err => logger.warn('updateCustomerLoyalty failed:', err.message));
+                .catch(e => logger.warn('updateCustomerLoyalty failed:', e.message));
         }
 
-        logger.success(`✅ تمت المعالجة (${aiResult.responseTime}ms)`, {
-            from: incomingMessage.from,
+        logger.success(`✅ معالجة كاملة ${Date.now() - start}ms`, {
+            from:      incoming.from,
             topic,
             intent,
             sentiment: sentimentResult.label,
-            tools: aiResult.toolsUsed?.join(', ') || 'none',
+            tools:     aiResult.toolsUsed?.join(', ') || 'none',
         });
 
     } catch (error) {
         logger.error('❌ خطأ في معالجة الرسالة:', error.message);
 
+        // Try to send error message to user
         try {
-            const from = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from;
-            if (from) {
-                await whatsappService.sendTextMessage(from, 'عذراً، صار عنا مشكلة تقنية بسيطة 😔\nرح نتواصل معك بأقرب وقت. أو اتصل على 06-5000001');
-            }
-        } catch {}
+            await whatsappService.sendTextMessage(
+                incoming.from,
+                'عذراً، صار عنا مشكلة تقنية بسيطة 😔\nاتصل على 06-5000001 وإحنا نساعدك!'
+            );
+        } catch { /* ignore send errors during failure path */ }
     }
-});
+}
 
 module.exports = router;
