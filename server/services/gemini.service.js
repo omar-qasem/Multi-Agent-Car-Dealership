@@ -17,6 +17,8 @@ const SYSTEM_PROMPT = `أنت "أبو الزوز" 🚗 مساعد أوتو جو�
 
 **ممنوع:** تخمين أسعار، تأكيد حجز بدون booking_id، استدعاء أداة قبل جمع متطلباتها. **سؤال واحد فقط في كل رسالة.**
 
+⚡ **قاعدة الأداء:** إذا وُجدت **بيانات من المخزون** أو **قطع غيار متوفرة** في السياق أدناه، اعتمد عليها مباشرةً — **لا تستدعِ search_cars أو check_parts_inventory مجدداً.** استدعِ الأداة فقط إذا لم تجد البيانات في السياق.
+
 ## 📋 حجز الصيانة — 7 خطوات مرتبة:
 1. نوع الخدمة → اسأل إذا ما ذكره
 2. ماركة وموديل السيارة → اسأل إذا ما ذكرهم
@@ -30,9 +32,9 @@ const SYSTEM_PROMPT = `أنت "أبو الزوز" 🚗 مساعد أوتو جو�
 7. بعد booking_id → أكّد التفاصيل للعميل وأخبره بنتصل عليه
 
 ## 🚗 شراء سيارة:
-1. استدعِ search_cars بالمواصفات المتوفرة (ماركة/ميزانية/نوع وقود/حالة...)
+1. إذا وُجدت **بيانات من المخزون** في السياق → اعرضها مباشرة ولا تستدعِ search_cars. إذا لم توجد → استدعِ search_cars بالمواصفات المتوفرة (ماركة/ميزانية/نوع وقود/حالة...).
 2. اعرض النتائج للعميل
-3. إذا رجع search_cars فارغ: أخبره ما في بهالمواصفات الآن، اقترح بدائل أو سجّل اهتمامه
+3. إذا لم تُوجَد سيارات: أخبره ما في بهالمواصفات الآن، اقترح بدائل أو سجّل اهتمامه
 4. إذا أبدى اهتماماً جدياً → استدعِ create_purchase_inquiry (اسأل: تقسيط؟ عنده سيارة للبدل؟)
 
 ## 💰 تقسيط:
@@ -228,15 +230,14 @@ class GeminiService {
     async generateResponse(phoneNumber, userMessage, customerName) {
         const startTime = Date.now();
 
-        // AbortController — cancels in-flight Groq HTTP requests when our budget runs out.
-        // Prevents timed-out calls from running 100+ seconds in the background (consuming
-        // Groq TPM quota and causing rate-limit cascades on the next request).
-        // Budget = 18s (2s below the outer 20s step timeout).
+        // Global AbortController — hard ceiling for the entire pipeline.
+        // Budget = 16s (4s below the outer 20s step timeout, giving cleanup room).
+        // This catches stuck LLM1 calls and any runaway async work.
         const abortController = new AbortController();
         const abortTimer = setTimeout(() => {
-            logger.warn('⏱️ generateResponse: 18s budget exhausted — aborting Groq request');
+            logger.warn('⏱️ generateResponse: 16s global budget exhausted — aborting Groq request');
             abortController.abort();
-        }, 18000);
+        }, 16000);
 
         try {
             // ── 0. Fast Intent Classifier (<1ms) ────────────────────
@@ -408,12 +409,28 @@ class GeminiService {
                 messages.push(...toolResults);
 
                 // ── LLM2: Generate response after tool execution ─────
-                // If this call times out/fails, use _formatToolFallback to build
-                // an Arabic response from the tool result so the user isn't left
-                // with a generic error even though their action succeeded.
+                // LLM2 just needs to format the tool result into Arabic — it's a short
+                // generation task. Give it a DEDICATED budget based on remaining time.
+                // If it times out, _formatToolFallback builds an instant Arabic response
+                // from the tool result, so the user still gets a useful message.
+                //
+                // Budget calculation:
+                //   elapsed = time since generateResponse started
+                //   llm2Budget = min(7s, max(3s, 15s - elapsed))
+                //   This ensures LLM2 never hogs more than 7s AND always gets at least 3s.
+                const elapsed = Date.now() - startTime;
+                const llm2BudgetMs = Math.min(7000, Math.max(3000, 15000 - elapsed));
+                const llm2Abort = new AbortController();
+                const llm2Timer = setTimeout(() => {
+                    logger.warn(`⏱️ LLM2: ${llm2BudgetMs}ms budget exhausted — using tool fallback`);
+                    llm2Abort.abort();
+                }, llm2BudgetMs);
+
                 let llm2Failed = false;
                 try {
-                    response = await this._callGroq({ ...llmParams, messages }, abortController.signal);
+                    // LLM2 only formats tool results → needs fewer tokens → faster
+                    const llm2Params = { ...llmParams, max_tokens: 350 };
+                    response = await this._callGroq({ ...llm2Params, messages }, llm2Abort.signal);
                     assistantMessage = response.choices[0].message;
                 } catch (llm2Err) {
                     logger.warn(`⚠️ LLM2 failed (${llm2Err?.message}) — using tool result template`);
@@ -430,6 +447,8 @@ class GeminiService {
                         assistantMessage = { content: 'تم تنفيذ طلبك ✅\nللمزيد: 06-5000001', tool_calls: null };
                     }
                     break; // exit tool loop — we have a response
+                } finally {
+                    clearTimeout(llm2Timer);
                 }
             }
 
