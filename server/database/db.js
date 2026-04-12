@@ -591,14 +591,35 @@ async function updateBookingStatus(id, status, notes) {
   if (notes !== undefined) payload.staff_notes = notes;
 
   if (useSupabase) {
-    const { data: row, error } = await supabase.from('bookings').update(payload).eq('id', id).select().single();
+    const { data: row, error } = await supabase.from('bookings').update(payload).eq('id', id).select().maybeSingle();
     if (error) sbThrow('updateBookingStatus', error);
-    return row;
+    return row; // null when id not found — callers handle 404
   }
   const booking = mem.bookings.find(b => String(b.id) === String(id));
   if (!booking) return null;
   Object.assign(booking, payload);
   return booking;
+}
+
+// =============================================
+// BRANCH AVAILABILITY
+// =============================================
+async function getBookingsByBranchAndDate(branch, date) {
+  if (useSupabase) {
+    const { data, error } = await supabase
+      .from('bookings')
+      .select('id, preferred_time, service_type, customer_name')
+      .eq('branch', branch)
+      .eq('preferred_date', date)
+      .neq('status', 'cancelled');
+    if (error) sbThrow('getBookingsByBranchAndDate', error);
+    return data || [];
+  }
+  return mem.bookings.filter(b =>
+    b.branch === branch &&
+    b.preferred_date === date &&
+    b.status !== 'cancelled'
+  );
 }
 
 // =============================================
@@ -665,9 +686,9 @@ async function updateTicket(id, data) {
   }
 
   if (useSupabase) {
-    const { data: row, error } = await supabase.from('support_tickets').update(payload).eq('id', id).select().single();
+    const { data: row, error } = await supabase.from('support_tickets').update(payload).eq('id', id).select().maybeSingle();
     if (error) sbThrow('updateTicket', error);
-    return row;
+    return row; // null when id not found — callers handle 404
   }
   const ticket = mem.tickets.find(t => String(t.id) === String(id));
   if (!ticket) return null;
@@ -744,8 +765,9 @@ async function updateInquiry(id, data) {
   delete payload.created_at;
 
   if (useSupabase) {
-    const { data: row, error } = await supabase.from('purchase_inquiries').update(payload).eq('id', id).select().single();
+    const { data: row, error } = await supabase.from('purchase_inquiries').update(payload).eq('id', id).select().maybeSingle();
     if (error) sbThrow('updateInquiry', error);
+    // null when id not found — callers handle 404
     return row;
   }
   const inquiry = mem.inquiries.find(i => String(i.id) === String(id));
@@ -1170,6 +1192,7 @@ module.exports = {
   getCustomerBookings,
   getAllBookings,
   updateBookingStatus,
+  getBookingsByBranchAndDate,
   // Tickets
   createTicket,
   getAllTickets,

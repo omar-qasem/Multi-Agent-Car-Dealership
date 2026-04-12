@@ -15,29 +15,41 @@ const { retrieveContext } = require('./rag.service');
 // =============================================
 const SYSTEM_PROMPT = `أنت "أبو الزوز" 🚗 مساعد أوتو جوردن للسيارات - بتحكي بلهجة أردنية ودية مختصرة.
 
-## الأدوات — قواعد صارمة:
-- سعر / توفر سيارة → search_cars أو check_availability (لا تخمّن الأسعار!)
-- قطعة غيار (بريك/فلتر/بطارية/إطار/زيت/شمعات) → check_parts_inventory
-- حجز صيانة → book_maintenance (تأكيد فقط بعد رجوع booking_id)
+**ممنوع:** تخمين أسعار، تأكيد حجز بدون booking_id، استدعاء أداة قبل جمع متطلباتها.
+
+## 📋 خط سير حجز الصيانة (الترتيب حاسم):
+1. **نوع الخدمة** — اسأل: "شو نوع الخدمة؟ (زيت، صيانة دورية، بريك، إطارات، كهربائي...)"
+2. **السيارة** — اسأل: "ماركة وموديل سيارتك؟"
+3. **التاريخ** — اسأل: "أي تاريخ يناسبك؟ (بصيغة يوم/شهر/سنة)"
+4. **الفرع** — اسأل: "أي فرع أقرب لك؟ (عمان، إربد، الزرقاء، العقبة)"
+5. **تحقق التوفر** — استدعِ check_branch_availability(branch, date)
+   - إذا رجع is_available=false: أخبر العميل الفرع مليء واقترح تواريخ بديلة من suggested_dates
+   - إذا رجع is_available=true: انتقل لخطوة 6
+6. **احجز** — استدعِ book_maintenance بكل الحقول: service_type + car_make + car_model + preferred_date + branch
+   - لا تستدعي book_maintenance أبداً قبل إكمال الخطوات 1-5
+   - إذا رجع needs_more_info=true من الأداة: معناها حقل ناقص — اسأل عنه فوراً
+7. **تأكيد** — بعد رجوع booking_id أخبر العميل بالتفاصيل وبدنا نتصل فيه للتأكيد
+
+**قاعدة:** سؤال واحد فقط في كل رسالة. لا تطرح عدة أسئلة دفعة واحدة.
+
+## 🚗 خط سير الشراء (الترتيب حاسم):
+1. **ابحث أولاً** — استدعِ search_cars بالمواصفات المتوفرة
+2. **اعرض النتائج** — أظهر السيارات للعميل بالأسعار والمواصفات
+3. **إذا أبدى اهتماماً جدياً** بسيارة محددة أو طلب التواصل → استدعِ create_purchase_inquiry
+   - لا تستدعي create_purchase_inquiry مباشرةً عند أول ذكر للشراء بدون عرض سيارات أولاً
+
+## 🔧 أدوات أخرى:
+- سعر / توفر سيارة → search_cars أو check_availability
+- قطعة غيار → check_parts_inventory
 - مقارنة سيارتين → compare_cars
-- تقسيط / قسط → calculate_financing
-- اهتمام بشراء → create_purchase_inquiry
-- يبدو غاضب / يطلب موظف → submit_support_ticket
-
-**ممنوع تخمين سعر أو تأكيد حجز.** إذا في "بيانات من المخزون" أدناه، اعتمد عليها مباشرة. إذا ما في، استدعِ الأداة أولاً.
-
-## قاعدة تدفّق النوايا — حاسمة:
-- بمجرد ما تتحدد النية (حجز/شراء/استفسار) **لا تغيّر الموضوع أبداً** حتى لو المعلومات ناقصة.
-- حجز الصيانة ≠ استفسار شراء. ممنوع السؤال عن "أنواع السيارات المتوفرة" ردًا على طلب حجز.
-- إذا معلومة ناقصة: اسأل عنها مباشرة، سؤال واحد فقط في الرسالة.
-- ترتيب جمع معلومات الحجز: نوع الخدمة → ماركة وموديل السيارة → التاريخ والوقت → الفرع → الاسم.
-- إذا توفّر service_type + preferred_date: استدعِ book_maintenance فوراً حتى لو باقي الحقول ناقصة — النظام يعالجها.
-- إذا رجع missing_info من الأداة: أكّد الحجز أولاً ثم اطلب المعلومات الناقصة لتحديثها.
+- تقسيط → calculate_financing
+- غاضب / يطلب موظف → submit_support_ticket
+- معلومات فرع → get_branch_info
 
 ## ردودك:
-- مختصرة ومفيدة، بدون مقدمات
+- مختصرة ومفيدة، بدون مقدمات طويلة
 - إيموجي خفيف (🚗 🔧 ✅ 💰)
-- إذا الأداة رجعت خطأ: "واجهنا مشكلة بسيطة، اتصل 06-5000001"
+- إذا الأداة رجعت خطأ تقني: "واجهنا مشكلة بسيطة، اتصل 06-5000001"
 
 ## معلومات أوتو جوردن:
 - عمان، شارع المدينة المنورة | 06-5000001
@@ -156,11 +168,29 @@ class GeminiService {
         try {
             const r = typeof toolResult === 'string' ? JSON.parse(toolResult) : toolResult;
             switch (toolName) {
-                case 'book_maintenance': {
-                    if (r.booking_id || r.id) {
-                        return `✅ تم حجز موعد الصيانة بنجاح!\n📋 رقم الحجز: ${r.booking_id || r.id}\n\nسنتواصل معك للتأكيد. للاستفسار: 06-5000001`;
+                case 'check_branch_availability': {
+                    if (r.is_available === false) {
+                        const alts = (r.suggested_dates || []).join('، ') || 'تواريخ قريبة';
+                        return `عذراً، فرع ${r.branch || ''} محجوز بالكامل بتاريخ ${r.date || ''}.\n📅 تواريخ بديلة مقترحة: ${alts}\nأي تاريخ يناسبك؟`;
                     }
-                    if (r.missing_info) return `بحتاج منك معلومة واحدة: ${r.missing_info} 🙏`;
+                    if (r.is_available === true) {
+                        const slots = (r.available_time_slots || []).slice(0, 4).join('، ');
+                        return `✅ فرع ${r.branch || ''} متوفر بتاريخ ${r.date || ''}!\nأوقات متاحة: ${slots}\nأي وقت يناسبك؟`;
+                    }
+                    return null;
+                }
+                case 'book_maintenance': {
+                    if (r.booking_id || (r.details && r.details.booking_id)) {
+                        const id = r.booking_id || r.details?.booking_id;
+                        const branch = r.details?.branch || '';
+                        const date = r.details?.date || '';
+                        const car = r.details?.car || '';
+                        return `✅ تم حجز موعد الصيانة بنجاح!\n📋 رقم الحجز: ${id}\n🏢 الفرع: ${branch}\n📅 التاريخ: ${date}\n🚗 السيارة: ${car}\n\nسنتواصل معك للتأكيد. للاستفسار: 06-5000001`;
+                    }
+                    if (r.needs_more_info) {
+                        const fields = (r.missing_fields || []).join('، ');
+                        return `بحتاج منك معلومات إضافية: ${fields} 🙏`;
+                    }
                     return `تم استلام طلب الحجز ✅\nسنتواصل معك على رقمك للتأكيد.\nأو اتصل: 06-5000001`;
                 }
                 case 'submit_support_ticket': {

@@ -52,25 +52,41 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'check_branch_availability',
+      description: 'التحقق من توفر مواعيد في فرع معين في تاريخ محدد قبل الحجز. استدعها دائماً بعد جمع الفرع والتاريخ وقبل استدعاء book_maintenance. تُعيد عدد الحجوزات الحالية، الفترات المتاحة، وهل الفرع مليء أم لا.',
+      parameters: {
+        type: 'object',
+        properties: {
+          branch: { type: 'string', description: 'الفرع: عمان، إربد، الزرقاء، العقبة' },
+          date: { type: 'string', description: 'التاريخ بصيغة YYYY-MM-DD' },
+        },
+        required: ['branch', 'date'],
+      },
+    },
+  },
+
+  {
+    type: 'function',
+    function: {
       name: 'book_maintenance',
-      description: 'حجز موعد صيانة لعميل. استخدمها فور ما يتأكد قصد الحجز وتتوفر خدمة + تاريخ. باقي الحقول اختيارية وتُجمَع عبر محادثة لاحقة أو يُستخدَم default. preferred_date يقبل نص طبيعي مثل "بكرا" أو "الاثنين الجاي" أو "2026-04-14".',
+      description: 'حجز موعد صيانة لعميل. استدعها فقط بعد جمع جميع الحقول المطلوبة: نوع الخدمة، ماركة السيارة، موديل السيارة، التاريخ المفضل، والفرع. إذا كان أي حقل ناقص اسأل العميل أولاً ولا تستدعي هذه الأداة. يجب استدعاء check_branch_availability قبلها للتأكد من توفر الفرع.',
       parameters: {
         type: 'object',
         properties: {
           customer_name: { type: 'string', description: 'اسم العميل (اختياري - لو ما ذكره استخدم رقمه)' },
-          car_make: { type: 'string', description: 'ماركة السيارة مثل Toyota أو Hyundai' },
-          car_model: { type: 'string', description: 'موديل السيارة' },
-          car_year: { type: 'number', description: 'سنة السيارة' },
+          car_make: { type: 'string', description: 'ماركة السيارة مثل Toyota أو Hyundai (مطلوب)' },
+          car_model: { type: 'string', description: 'موديل السيارة مثل Camry أو Tucson (مطلوب)' },
+          car_year: { type: 'number', description: 'سنة السيارة (اختياري)' },
           service_type: {
             type: 'string',
-            description: 'نوع الخدمة: تغيير زيت، صيانة دورية، فحص شامل، إطارات، بريك، كهربائي، تبريد، أو أخرى'
+            description: 'نوع الخدمة (مطلوب): تغيير زيت، صيانة دورية، فحص شامل، إطارات، بريك، كهربائي، تبريد، أو أخرى'
           },
-          preferred_date: { type: 'string', description: 'التاريخ المفضل — نص طبيعي أو ISO (مثل "الاثنين 10 الصبح" أو 2026-04-14)' },
+          preferred_date: { type: 'string', description: 'التاريخ المفضل بصيغة YYYY-MM-DD (مطلوب)' },
           preferred_time: { type: 'string', description: 'الوقت المفضل' },
-          branch: { type: 'string', description: 'الفرع: عمان، إربد، الزرقاء، العقبة' },
+          branch: { type: 'string', description: 'الفرع (مطلوب): عمان، إربد، الزرقاء، العقبة' },
           notes: { type: 'string', description: 'ملاحظات إضافية' },
         },
-        required: ['service_type', 'preferred_date'],
+        required: ['service_type', 'car_make', 'car_model', 'preferred_date', 'branch'],
       },
     },
   },
@@ -128,7 +144,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'create_purchase_inquiry',
-      description: 'تسجيل استفسار شراء سيارة من عميل مهتم. استدعها فور ما يُبدي العميل اهتمام جدي بشراء حتى لو كانت المعلومات غير مكتملة.',
+      description: 'تسجيل استفسار شراء سيارة من عميل مهتم. استدعها فقط بعد: (1) عرض نتائج search_cars للعميل و(2) تأكيد اهتمامه الجدي بسيارة معينة أو بالشراء عموماً. لا تستدعيها مباشرةً عند أول ذكر للشراء — ابدأ بـ search_cars دائماً.',
       parameters: {
         type: 'object',
         properties: {
@@ -258,28 +274,104 @@ async function executeTool(toolName, args, customerPhone) {
         };
       }
 
+      case 'check_branch_availability': {
+        const { branch, date } = args;
+        const VALID_BRANCHES = ['عمان', 'إربد', 'الزرقاء', 'العقبة'];
+        if (!VALID_BRANCHES.includes(branch)) {
+          return {
+            success: false,
+            message: `الفرع "${branch}" غير صحيح. الأفرع المتاحة: عمان، إربد، الزرقاء، العقبة.`,
+          };
+        }
+
+        const MAX_DAILY_BOOKINGS = 12;
+        const TIME_SLOTS = ['8:00 ص', '9:00 ص', '10:00 ص', '11:00 ص', '12:00 م', '1:00 م', '2:00 م', '3:00 م', '4:00 م', '5:00 م', '6:00 م', '7:00 م'];
+
+        const existingBookings = await db.getBookingsByBranchAndDate(branch, date);
+        const bookedCount = existingBookings.length;
+        const isFull = bookedCount >= MAX_DAILY_BOOKINGS;
+
+        // Build rough list of taken time slots from bookings
+        const takenSlots = new Set(existingBookings.map(b => b.preferred_time).filter(Boolean));
+        const availableSlots = TIME_SLOTS.filter(s => !takenSlots.has(s));
+
+        if (isFull) {
+          // Suggest next 3 working days as alternatives
+          const suggestions = [];
+          const d = new Date(date);
+          while (suggestions.length < 3) {
+            d.setDate(d.getDate() + 1);
+            const dayOfWeek = d.getDay(); // 5 = Friday (closed)
+            if (dayOfWeek !== 5) { // Skip Fridays
+              suggestions.push(d.toISOString().split('T')[0]);
+            }
+          }
+          return {
+            success: true,
+            is_available: false,
+            branch,
+            date,
+            booking_count: bookedCount,
+            max_capacity: MAX_DAILY_BOOKINGS,
+            message: `فرع ${branch} محجوز بالكامل بتاريخ ${date} (${bookedCount}/${MAX_DAILY_BOOKINGS} مواعيد).`,
+            suggested_dates: suggestions,
+          };
+        }
+
+        return {
+          success: true,
+          is_available: true,
+          branch,
+          date,
+          booking_count: bookedCount,
+          available_slots_count: MAX_DAILY_BOOKINGS - bookedCount,
+          available_time_slots: availableSlots,
+          message: `فرع ${branch} متوفر بتاريخ ${date}. ${MAX_DAILY_BOOKINGS - bookedCount} مواعيد متاحة.`,
+        };
+      }
+
       case 'book_maintenance': {
-        // Fallback: use phone as customer_name placeholder if missing
+        // Hard-validate all required fields — the LLM should have collected them via conversation
+        const missing = [];
+        if (!args.car_make  || args.car_make.trim()  === '') missing.push('ماركة السيارة (مثلاً: Toyota)');
+        if (!args.car_model || args.car_model.trim() === '') missing.push('موديل السيارة (مثلاً: Camry)');
+        if (!args.branch    || args.branch.trim()    === '') missing.push('الفرع (عمان، إربد، الزرقاء، العقبة)');
+
+        if (missing.length > 0) {
+          return {
+            success: false,
+            needs_more_info: true,
+            missing_fields: missing,
+            message: `لازم تتأكد من المعلومات الناقصة قبل الحجز: ${missing.join('، ')}. اسأل العميل عنها أولاً.`,
+          };
+        }
+
+        const VALID_BRANCHES = ['عمان', 'إربد', 'الزرقاء', 'العقبة'];
+        if (!VALID_BRANCHES.includes(args.branch)) {
+          return {
+            success: false,
+            message: `الفرع "${args.branch}" غير صحيح. الأفرع المتاحة: عمان، إربد، الزرقاء، العقبة.`,
+          };
+        }
+
         const customerName = args.customer_name || `عميل ${customerPhone.slice(-4)}`;
-        const carMake    = args.car_make  || 'غير محدد';
-        const carModel   = args.car_model || 'غير محدد';
 
         await db.upsertCustomer(customerPhone, {
           name: customerName,
-          car_make: carMake,
-          car_model: carModel,
+          car_make: args.car_make,
+          car_model: args.car_model,
         });
 
         const booking = await db.createBooking({
           customer_phone:  customerPhone,
           customer_name:   customerName,
-          car_make:        carMake,
-          car_model:       carModel,
+          car_make:        args.car_make,
+          car_model:       args.car_model,
           car_year:        args.car_year || null,
           service_type:    args.service_type,
           preferred_date:  args.preferred_date,
           preferred_time:  args.preferred_time || '9:00 صباحاً',
-          branch:          args.branch || 'عمان',
+          branch:          args.branch,
           notes:           args.notes || '',
         });
 
@@ -295,12 +387,6 @@ async function executeTool(toolName, args, customerPhone) {
             branch:     booking.branch,
             car:        `${booking.car_make} ${booking.car_model}`,
           },
-          // Hint to AI: if any of these came back as "غير محدد", ask customer for them now
-          missing_info: [
-            !args.customer_name && 'الاسم',
-            !args.car_make && 'ماركة السيارة',
-            !args.car_model && 'موديل السيارة',
-          ].filter(Boolean),
         };
       }
 
