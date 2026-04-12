@@ -132,6 +132,27 @@ const FAQ_PATTERNS = [
             '• تقسيط حتى 60 شهر (شروط البنك)\n\n' +
             'بدك تفاصيل التقسيط لسيارة معينة؟',
     },
+    {
+        intent: 'faq_warranty',
+        regex: /(?:ضمان|كفالة|ضماان|warranty|guarantee)/i,
+        response:
+            'الضمان في أوتو جوردن 🛡️\n' +
+            '• السيارات الجديدة: ضمان المصنع (3-5 سنوات حسب الماركة)\n' +
+            '• السيارات المستعملة المعتمدة: ضمان 6 أشهر أو 10,000 كم\n' +
+            '• خدمات الصيانة: ضمان 3 أشهر أو 5,000 كم على الشغل والقطع\n\n' +
+            'بدك تفاصيل ضمان ماركة معينة؟',
+    },
+    {
+        intent: 'faq_trade_in',
+        regex: /(?:استبدال\s+سيارت|أبيع\s+سيارت|بيع\s+سيارت|trade[\s-]?in|استبدل\s+سيارت)/i,
+        response:
+            'خدمة استبدال السيارة 🔄\n' +
+            'تقدر تستبدل سيارتك الحالية عند شراء سيارة جديدة أو مستعملة.\n\n' +
+            '1️⃣ نقيّم سيارتك مجاناً في أي فرع\n' +
+            '2️⃣ نطرح القيمة من سعر السيارة الجديدة\n' +
+            '3️⃣ تدفع الفرق فقط\n\n' +
+            'بدك تحجز موعد تقييم؟',
+    },
 ];
 
 // =============================================
@@ -256,6 +277,13 @@ function extractFuelType(text) {
     return null;
 }
 
+function extractCondition(text) {
+    const norm = normalize(text);
+    if (/جديد[ةه]?|new\s+car/i.test(norm))      return 'new';
+    if (/مستعمل[ةه]?|used\s+car|سكند\s+هاند|second\s*hand/i.test(norm)) return 'used';
+    return null;
+}
+
 // Helper: returns true if any strong intent keyword is present.
 function hasStrongIntentKeyword(text) {
     for (const re of Object.values(INTENT_PATTERNS)) {
@@ -290,13 +318,14 @@ function classify(text) {
 
     // Always extract entities — useful even when intent is unclear
     const entities = {};
-    const make = extractCarMake(norm);          if (make)    entities.car_make = make;
-    const model = extractCarModel(norm);        if (model)   entities.car_model = model;
-    const service = extractServiceType(norm);   if (service) entities.service_type = service;
-    const branch = extractBranch(norm);         if (branch)  entities.branch = branch;
-    const date = extractDate(norm);             if (date)    entities.date = date;
-    const budget = extractBudget(norm);         if (budget)  entities.budget = budget;
-    const fuel = extractFuelType(norm);          if (fuel)    entities.fuel_type = fuel;
+    const make      = extractCarMake(norm);      if (make)      entities.car_make    = make;
+    const model     = extractCarModel(norm);     if (model)     entities.car_model   = model;
+    const service   = extractServiceType(norm);  if (service)   entities.service_type = service;
+    const branch    = extractBranch(norm);       if (branch)    entities.branch      = branch;
+    const date      = extractDate(norm);         if (date)      entities.date        = date;
+    const budget    = extractBudget(norm);       if (budget)    entities.budget      = budget;
+    const fuel      = extractFuelType(norm);     if (fuel)      entities.fuel_type   = fuel;
+    const condition = extractCondition(norm);    if (condition) entities.condition   = condition;
 
     // 1. Greetings — very high confidence canned response.
     //    Guards: short message AND no strong intent keyword present.
@@ -374,4 +403,5 @@ module.exports = {
     extractDate,
     extractBudget,
     extractFuelType,
+    extractCondition,
 };

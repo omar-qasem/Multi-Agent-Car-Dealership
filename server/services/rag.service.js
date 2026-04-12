@@ -84,10 +84,11 @@ async function _retrieve(intent, e) {
  */
 async function _retrieveCars(e) {
     const searchParams = {};
-    if (e.car_make)   searchParams.make = e.car_make;
-    if (e.car_model)  searchParams.model = e.car_model;
+    if (e.car_make)   searchParams.make      = e.car_make;
+    if (e.car_model)  searchParams.model     = e.car_model;
     if (e.budget)     searchParams.max_price = e.budget;
     if (e.fuel_type)  searchParams.fuel_type = e.fuel_type;
+    if (e.condition)  searchParams.condition = e.condition;
 
     const cars = await db.searchCars(searchParams);
     if (!cars || cars.length === 0) return null;
