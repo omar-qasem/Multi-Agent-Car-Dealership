@@ -376,6 +376,21 @@ class GeminiService {
             const toolsUsed = [];
             let lastToolResults = []; // kept for graceful degradation if LLM2 fails
 
+            // ── Tool deduplication cache (per request) ──────────────
+            // LLMs sometimes call the same read-only tool twice — once via LLM1 and
+            // again when LLM2 (the post-tool-execution response) decides it needs more
+            // data. This cache intercepts duplicate calls and returns the prior result
+            // instantly, saving 4-10s per duplicated tool call.
+            //
+            // Only pure-read tools are cached — write tools (book_maintenance, etc.)
+            // must always execute.
+            const CACHEABLE_TOOLS = new Set([
+                'search_cars', 'check_parts_inventory', 'get_promotions',
+                'get_branch_info', 'compare_cars', 'get_customer_bookings',
+                'check_availability', 'calculate_financing', 'check_branch_availability',
+            ]);
+            const toolResultCache = new Map(); // key: "toolName:argsJSON" → resultJSON
+
             // ── Tool-call loop (parallel execution per round) ───────
             while (
                 assistantMessage.tool_calls?.length > 0 &&
@@ -394,14 +409,37 @@ class GeminiService {
                         } catch {
                             logger.warn('⚠️ فشل parse لأرجومنت الأداة:', toolCall.function.arguments);
                         }
+
+                        // ── Dedup check ──────────────────────────────
+                        if (CACHEABLE_TOOLS.has(toolName)) {
+                            const cacheKey = `${toolName}:${JSON.stringify(toolArgs)}`;
+                            if (toolResultCache.has(cacheKey)) {
+                                logger.warn(`🚫 Dedup: ${toolName} already called — returning cached result (0ms)`);
+                                return {
+                                    role: 'tool',
+                                    tool_call_id: toolCall.id,
+                                    name: toolName,
+                                    content: toolResultCache.get(cacheKey),
+                                };
+                            }
+                        }
+
                         logger.info(`🔧 Tool #${toolCallCount}: ${toolName}`);
                         toolsUsed.push(toolName);
                         const result = await executeTool(toolName, toolArgs, phoneNumber);
+                        const resultStr = JSON.stringify(result);
+
+                        // Store in cache so any duplicate call this turn is instant
+                        if (CACHEABLE_TOOLS.has(toolName)) {
+                            const cacheKey = `${toolName}:${JSON.stringify(toolArgs)}`;
+                            toolResultCache.set(cacheKey, resultStr);
+                        }
+
                         return {
                             role: 'tool',
                             tool_call_id: toolCall.id,
                             name: toolName,  // extra field — used by formatToolFallback
-                            content: JSON.stringify(result),
+                            content: resultStr,
                         };
                     })
                 );
@@ -418,6 +456,20 @@ class GeminiService {
                 //   elapsed = time since generateResponse started
                 //   llm2Budget = min(7s, max(3s, 15s - elapsed))
                 //   This ensures LLM2 never hogs more than 7s AND always gets at least 3s.
+                //
+                // Tool pruning:
+                //   Remove all already-called cacheable tools from LLM2's tool list.
+                //   This prevents LLM2 from issuing a repeat tool call that the cache
+                //   would handle at 0ms cost — but more importantly, prevents the
+                //   extra LLM round-trip overhead that the cache can't eliminate.
+                const calledCacheableTools = new Set(
+                    toolsUsed.filter(t => CACHEABLE_TOOLS.has(t))
+                );
+                const llm2Tools = TOOL_DEFINITIONS.filter(
+                    t => !calledCacheableTools.has(t.function?.name)
+                );
+                logger.info(`🛡️ LLM2 tools: ${TOOL_DEFINITIONS.length} → ${llm2Tools.length} (pruned ${calledCacheableTools.size} already-called)`);
+
                 const elapsed = Date.now() - startTime;
                 const llm2BudgetMs = Math.min(7000, Math.max(3000, 15000 - elapsed));
                 const llm2Abort = new AbortController();
@@ -429,7 +481,13 @@ class GeminiService {
                 let llm2Failed = false;
                 try {
                     // LLM2 only formats tool results → needs fewer tokens → faster
-                    const llm2Params = { ...llmParams, max_tokens: 350 };
+                    // Use pruned tool list to prevent re-calling already-used read tools
+                    const llm2Params = {
+                        ...llmParams,
+                        max_tokens: 350,
+                        tools: llm2Tools.length > 0 ? llm2Tools : undefined,
+                        tool_choice: llm2Tools.length > 0 ? 'auto' : undefined,
+                    };
                     response = await this._callGroq({ ...llm2Params, messages }, llm2Abort.signal);
                     assistantMessage = response.choices[0].message;
                 } catch (llm2Err) {
