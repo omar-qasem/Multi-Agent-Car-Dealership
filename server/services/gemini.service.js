@@ -73,9 +73,13 @@ class GeminiService {
         this.client = null;
         this.conversationHistory = new Map();
         this.conversationLastAccess = new Map();
-        // llama-3.3-70b-versatile: reliable Arabic function calling
-        // llama-3.1-8b-instant: fast but generates malformed <function=...> tool calls
-        this.model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+        // Primary model: reliable Arabic function calling, but only 100k TPD on free tier
+        // Fallback model: higher TPD limits (500k), less reliable function calling
+        this.model         = process.env.GROQ_MODEL          || 'llama-3.3-70b-versatile';
+        this.fallbackModel = process.env.GROQ_FALLBACK_MODEL || 'llama-3.1-8b-instant';
+        // Track whether primary model's daily quota is exhausted this serverless instance.
+        // Resets automatically when Groq resets (midnight UTC) and when the Lambda cold-starts.
+        this._primaryModelExhausted = false;
         this.maxHistory = 8;     // Last 4 turns — smaller = fewer tokens = faster
         this.maxToolCalls = 3;   // Hard cap on tool round-trips
         this.MAX_CUSTOMERS = parseInt(process.env.MAX_CONVERSATION_CUSTOMERS) || 10000;
@@ -129,28 +133,54 @@ class GeminiService {
     /**
      * Low-level Groq API call with:
      * - AbortSignal support (pass the generateResponse-level controller)
-     * - Retry once on 429 (wait up to 3s) or connection errors
+     * - Automatic model fallback on TPD exhaustion (tokens-per-day quota)
+     * - Retry once on transient TPM (tokens-per-minute) rate limits (wait ≤3s)
+     * - Retry once on connection errors
+     *
+     * TPD vs TPM detection:
+     *   Groq error messages say "tokens per day (TPD)" for daily quota and
+     *   "tokens per minute" for per-minute bursts. TPD waits are measured in
+     *   minutes/hours → we switch models instead of waiting.
      */
     async _callGroq(params, signal) {
+        // If primary model's daily quota was already exhausted this instance,
+        // skip straight to fallback without a wasted round-trip.
+        const effectiveParams = (this._primaryModelExhausted && params.model === this.model)
+            ? { ...params, model: this.fallbackModel }
+            : params;
+
         for (let attempt = 1; attempt <= 2; attempt++) {
             try {
-                return await this.client.chat.completions.create(params, { signal });
+                return await this.client.chat.completions.create(effectiveParams, { signal });
             } catch (err) {
                 // AbortError → outer timeout fired, stop immediately
                 if (err?.name === 'AbortError' || signal?.aborted) throw err;
 
                 const status = err?.status || err?.statusCode;
+                const msg    = err?.message || '';
 
-                // 429 Rate limit — wait up to 3s then retry once
                 if (status === 429 && attempt < 2) {
-                    const waitMs = Math.min(this._parseRetryAfterMs(err?.message), 3000);
-                    logger.warn(`⚠️ Groq rate limit (429) — waiting ${waitMs}ms before retry`);
+                    const isTPD = /tokens per day/i.test(msg);
+
+                    if (isTPD) {
+                        // Daily quota exhausted — waiting is futile (42+ min).
+                        // Switch to fallback model for the rest of this instance's life.
+                        this._primaryModelExhausted = true;
+                        logger.warn(`⚠️ Groq TPD exhausted for ${effectiveParams.model} — switching to fallback: ${this.fallbackModel}`);
+                        effectiveParams.model = this.fallbackModel;
+                        // Retry immediately with new model (no sleep needed)
+                        continue;
+                    }
+
+                    // Transient TPM burst — wait briefly then retry same model
+                    const waitMs = Math.min(this._parseRetryAfterMs(msg), 3000);
+                    logger.warn(`⚠️ Groq TPM rate limit (429) — waiting ${waitMs}ms before retry`);
                     await new Promise(r => setTimeout(r, waitMs));
                     continue;
                 }
 
                 // Connection error — retry once immediately
-                if ((err?.message?.toLowerCase().includes('connection') || err?.message?.toLowerCase().includes('network')) && attempt < 2) {
+                if ((msg.toLowerCase().includes('connection') || msg.toLowerCase().includes('network')) && attempt < 2) {
                     logger.warn(`⚠️ Groq connection error — retrying immediately`);
                     continue;
                 }
@@ -162,8 +192,13 @@ class GeminiService {
 
     /** Extract retry-after seconds from Groq 429 error message */
     _parseRetryAfterMs(message = '') {
-        const m = message.match(/try again in (\d+(?:\.\d+)?)s/);
-        return m ? Math.ceil(parseFloat(m[1])) * 1000 : 2000;
+        // "try again in 2.5s" — TPM burst format
+        const secs = message.match(/try again in (\d+(?:\.\d+)?)s/);
+        if (secs) return Math.ceil(parseFloat(secs[1])) * 1000;
+        // "try again in 1m30s" — sometimes seen for longer waits
+        const mins = message.match(/try again in (\d+)m(\d+)s/);
+        if (mins) return (parseInt(mins[1]) * 60 + parseInt(mins[2])) * 1000;
+        return 2000;
     }
 
     /**
@@ -315,7 +350,7 @@ class GeminiService {
             while (history.length > this.maxHistory) history.shift();
 
             // ── Use RAG result from parallel fetch ──────────────────
-            const MAX_RAG_CHARS = 400; // Cap tokens — free tier is tight (6k TPM)
+            const MAX_RAG_CHARS = 300; // Cap tokens — free tier is tight (100k TPD)
             let ragContext = '';
             if (ragResult.status === 'fulfilled' && ragResult.value) {
                 ragContext = ragResult.value.substring(0, MAX_RAG_CHARS);
@@ -364,7 +399,7 @@ class GeminiService {
                 model: this.model,
                 tools: TOOL_DEFINITIONS,
                 tool_choice: 'auto',
-                max_tokens: 600,  // Reduced from 800 — saves TPM quota
+                max_tokens: 450,  // Reduced — saves TPD quota (100k/day limit)
                 temperature: 0.2,
             };
 
