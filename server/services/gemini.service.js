@@ -254,6 +254,35 @@ class GeminiService {
                     if (r.found || r.available) return `✅ القطعة متوفرة — ${r.name || ''} بسعر ${r.price || '?'} دينار`;
                     return `عذراً، هذه القطعة غير متوفرة حالياً.\nاتصل 06-5000001 للاستيراد 🔩`;
                 }
+                case 'get_branch_info': {
+                    // Whether it's a specific branch or all branches, show what we have
+                    const branches = Array.isArray(r) ? r : (r.branches || null);
+                    if (branches && branches.length) {
+                        const lines = branches.map((b, i) =>
+                            `${['1️⃣','2️⃣','3️⃣','4️⃣'][i] || '•'} ${b.name || b.city || ''} — ${b.address || ''}`
+                        ).join('\n');
+                        return `📍 أفرعنا:\n${lines}\n\nتلفون: 06-5000001`;
+                    }
+                    // Single branch object or unknown structure
+                    const name = r.name || r.city || r.branch || '';
+                    const addr = r.address || '';
+                    if (name || addr) return `📍 ${name}${addr ? ` — ${addr}` : ''}\nتلفون: 06-5000001`;
+                    return `عنا 4 أفرع 📍\n1️⃣ عمان - شارع المدينة المنورة\n2️⃣ إربد - شارع الجامعة\n3️⃣ الزرقاء - شارع الأمير محمد\n4️⃣ العقبة - شارع الملك الحسين\n\nتلفون: 06-5000001`;
+                }
+                case 'get_promotions': {
+                    const promos = Array.isArray(r) ? r : (r.promotions || r.offers || []);
+                    if (!promos.length) return `ما في عروض خاصة هلق 😊\nبس عنا تقسيط حتى 60 شهر دايماً!\nاتصل: 06-5000001`;
+                    const lines = promos.slice(0, 3).map(p => `• ${p.title || p.name || p.description || p}`).join('\n');
+                    return `🎉 عروضنا الحالية:\n${lines}\n\nللمزيد: 06-5000001`;
+                }
+                case 'get_customer_bookings': {
+                    const bookings = Array.isArray(r) ? r : (r.bookings || []);
+                    if (!bookings.length) return `ما عندك حجوزات نشطة حالياً 📋\nبدك تحجز موعد صيانة جديد؟`;
+                    const lines = bookings.slice(0, 3).map(b =>
+                        `• ${b.service_type || 'صيانة'} | ${b.preferred_date || ''} | ${b.branch || ''} | الحالة: ${b.status || ''}`
+                    ).join('\n');
+                    return `📋 حجوزاتك:\n${lines}`;
+                }
                 default:
                     return null; // no template for this tool — let outer fallback handle it
             }
@@ -607,18 +636,22 @@ class GeminiService {
         const msg = (message || '').toLowerCase();
         let response;
 
-        if (msg.includes('هلا') || msg.includes('مرحبا') || msg.includes('السلام') || msg.includes('هاي')) {
+        // NOTE: Order matters — check maintenance BEFORE generic "سيارة" to avoid
+        // misclassifying "صيانة للسيارة" as a car purchase intent.
+        if (msg.includes('هلا') || msg.includes('مرحبا') || msg.includes('السلام') || msg.includes('هاي') || msg.includes('اهلا')) {
             response = 'هلا والله! أهلين فيك بأوتو جوردن 🚗\nكيف بقدر أساعدك اليوم؟\n\n1️⃣ سيارات للبيع\n2️⃣ قطع غيار\n3️⃣ حجز صيانة\n4️⃣ عروض\n5️⃣ أحكي مع موظف';
-        } else if (msg.includes('سيارة') || msg.includes('شراء')) {
-            response = 'أهلين! عنا سيارات جديدة ومستعملة 🚗\nشو الماركة اللي بتفضلها وميزانيتك؟';
-        } else if (msg.includes('صيانة') || msg.includes('موعد')) {
-            response = 'تكرم! 🔧 محتاج منك: نوع سيارتك، الخدمة المطلوبة، والفرع (عمان/إربد/الزرقاء/العقبة)';
-        } else if (msg.includes('قطع') || msg.includes('غيار')) {
+        } else if (msg.includes('صيانة') || msg.includes('موعد') || msg.includes('احجز') || msg.includes('حجز') || msg.includes('اصلح') || msg.includes('صلح') || msg.includes('تصليح') || msg.includes('سيرفس')) {
+            response = 'تكرم! 🔧 محتاج منك:\n• نوع الخدمة (صيانة / فرامل / مكيف...)\n• ماركة السيارة وموديلها\n• الفرع (عمان/إربد/الزرقاء/العقبة)\n\nاحكيلي وبحجزلك فوراً!';
+        } else if (msg.includes('فرع') || msg.includes('فروع') || msg.includes('عنوان') || msg.includes('وين')) {
+            response = 'عنا 4 أفرع 📍\n1️⃣ عمان - شارع المدينة المنورة\n2️⃣ إربد - شارع الجامعة\n3️⃣ الزرقاء - شارع الأمير محمد\n4️⃣ العقبة - شارع الملك الحسين\n\nتلفون: 06-5000001';
+        } else if (msg.includes('قطع') || msg.includes('غيار') || msg.includes('سبير') || msg.includes('فلتر') || msg.includes('بطارية')) {
             response = 'أكيد! شو القطعة ولأي سيارة؟ 🔩';
-        } else if (msg.includes('موظف') || msg.includes('حدا')) {
+        } else if (msg.includes('موظف') || msg.includes('حدا') || msg.includes('شكوى') || msg.includes('مدير')) {
             response = 'تكرم يا غالي 📱 تلفون: 06-5000001\nأو افتحلك تذكرة ويتواصلوا معك.';
+        } else if (msg.includes('سيارة') || msg.includes('شراء') || msg.includes('اشتري') || msg.includes('تويوتا') || msg.includes('كيا') || msg.includes('هيونداي') || msg.includes('نيسان')) {
+            response = 'أهلين! عنا سيارات جديدة ومستعملة 🚗\nشو الماركة اللي بتفضلها وميزانيتك؟';
         } else {
-            response = 'أهلين بأوتو جوردن! 🚗\n\n1️⃣ سيارات\n2️⃣ قطع غيار\n3️⃣ صيانة\n4️⃣ عروض\n5️⃣ موظف\n\nاختار أو احكيلي شو بتحتاج!';
+            response = 'أهلين بأوتو جوردن! 🚗\n\n1️⃣ سيارات للبيع\n2️⃣ قطع غيار\n3️⃣ حجز صيانة\n4️⃣ عروض\n5️⃣ موظف\n\nاحكيلي شو بتحتاج!';
         }
 
         return {

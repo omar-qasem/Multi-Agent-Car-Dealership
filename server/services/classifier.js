@@ -61,6 +61,7 @@ const SERVICE_TYPES = {
     'صيانة': 'صيانة دورية',
     'سيرفس': 'صيانة دورية',
     'تغيير زيت': 'تغيير زيت',
+    'تغيير الزيت': 'تغيير زيت',
     'فحص': 'فحص شامل',
     'برمجة': 'برمجة',
     'كهرباء': 'كهرباء',
@@ -70,8 +71,39 @@ const SERVICE_TYPES = {
     'مكيف': 'صيانة مكيف',
     'فرامل': 'فرامل',
     'بريك': 'فرامل',
+    'اطارات': 'اطارات',
+    'طايرات': 'اطارات',
+    'إطارات': 'اطارات',
+    'اقزوزت': 'عادم',
+    'عادم': 'عادم',
+    'كاتالست': 'عادم',
+    'بطارية': 'بطارية',
+    'تشريب': 'تشريب',
+    'تبديل زجاج': 'زجاج',
+    'زجاج': 'زجاج',
+    'ناقل حركة': 'ناقل حركة',
+    'فيتة': 'حزام توقيت',
+    'حزام توقيت': 'حزام توقيت',
 };
 
+// Branch canonical names + common spelling variants (without hamza, with ب prefix, etc.)
+const BRANCH_VARIANTS = {
+    'عمان': 'عمان',
+    'بعمان': 'عمان',
+    'إربد': 'إربد',
+    'اربد': 'إربد',
+    'بإربد': 'إربد',
+    'باربد': 'إربد',
+    'الزرقاء': 'الزرقاء',
+    'الزرقا': 'الزرقاء',
+    'بالزرقا': 'الزرقاء',
+    'بالزرقاء': 'الزرقاء',
+    'زرقاء': 'الزرقاء',
+    'زرقا': 'الزرقاء',
+    'العقبة': 'العقبة',
+    'بالعقبة': 'العقبة',
+    'عقبة': 'العقبة',
+};
 const BRANCHES = ['عمان', 'إربد', 'الزرقاء', 'العقبة'];
 
 const FUEL_TYPES = {
@@ -104,7 +136,7 @@ const FAQ_PATTERNS = [
     },
     {
         intent: 'faq_branches',
-        regex: /(?:كم\s+فرع|أفرعكم|الأفرع|وين\s+فروعكم|عناوين|عنوان\s+الفرع|locations?|branches?)/i,
+        regex: /(?:كم\s+فرع|أفرعكم|الأفرع|وين\s+فروعكم|فروعكم|عندكم\s+فروع|شو\s+عندكم\s+فروع|عناوين|عنوان\s+الفرع|locations?|branches?)/i,
         response:
             'عنا 4 أفرع 📍\n' +
             '1️⃣ عمان (الرئيسي) - شارع المدينة المنورة\n' +
@@ -159,7 +191,8 @@ const FAQ_PATTERNS = [
 // Strong intent keywords
 // =============================================
 const INTENT_PATTERNS = {
-    booking:  /(?:بدي\s+(?:أحجز|احجز|حجز)|حجز\s+(?:صيانة|موعد)|أحجز\s+موعد|book|appointment)/i,
+    // Booking: explicit "احجز/حجز" OR repair/fix verbs OR service terms
+    booking:  /(?:بدي\s+(?:أحجز|احجز|حجز|اعمل\s+صيانة|أعمل\s+صيانة)|حجز\s+(?:صيانة|موعد)|أحجز\s+موعد|بدي\s+(?:اصلح|أصلح|تصليح)|اصلح\s+ال|تصليح\s+ال|book|appointment)/i,
     purchase: /(?:بدي\s+(?:أشتري|اشتري|سيارة\s+جديدة)|شو\s+عندكم\s+(?:سيارات|موديل)|أبغى\s+سيارة|buy\s+(?:a\s+)?car)/i,
     support:  /(?:بدي\s+(?:أحكي|احكي)\s+مع\s+(?:حدا|موظف|مدير)|شكوى|complaint|talk\s+to\s+(?:agent|human|manager))/i,
     parts:    /(?:قطعة|قطع\s+غيار|سبير|spare\s+part|بدي\s+(?:فلتر|بطارية|إطار|بريك))/i,
@@ -223,8 +256,9 @@ function extractServiceType(text) {
 
 function extractBranch(text) {
     const lower = normalize(text).toLowerCase();
-    for (const b of BRANCHES) {
-        if (lower.includes(b.toLowerCase())) return b;
+    // Check variants first (longer strings) then canonical names
+    for (const [variant, canonical] of Object.entries(BRANCH_VARIANTS)) {
+        if (lower.includes(variant.toLowerCase())) return canonical;
     }
     return null;
 }
