@@ -8,6 +8,7 @@ const logger = require('../utils/logger');
 const { TOOL_DEFINITIONS, executeTool } = require('./agent-tools');
 const db = require('../database/db');
 const { classify } = require('./classifier');
+const { retrieveContext } = require('./rag.service');
 
 // =============================================
 // System Prompt — مختصر ومركّز للسرعة
@@ -181,6 +182,25 @@ class GeminiService {
             // Trim to maxHistory
             while (history.length > this.maxHistory) history.shift();
 
+            // ── RAG: Pre-fetch relevant data from DB ────────────────
+            // Runs in parallel with nothing — it's fast (<1.5s timeout).
+            // The retrieved context is injected into the system prompt so the
+            // LLM can answer without a tool-call round-trip.
+            let ragContext = '';
+            try {
+                const retrieved = await retrieveContext(
+                    classification.intent,
+                    classification.entities,
+                    prevEntities
+                );
+                if (retrieved) {
+                    ragContext = retrieved;
+                    logger.info(`📚 RAG: injected ${ragContext.length} chars of context`);
+                }
+            } catch (e) {
+                logger.warn(`⚠️ RAG failed (continuing without): ${e.message}`);
+            }
+
             // ── Build messages ──────────────────────────────────────
             // Inject classifier context so the LLM doesn't waste tokens re-extracting
             let classifierHint = '';
@@ -197,8 +217,8 @@ class GeminiService {
             }
 
             const systemNote = customerName
-                ? `${SYSTEM_PROMPT}${classifierHint}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
-                : `${SYSTEM_PROMPT}${classifierHint}\nرقم العميل: ${phoneNumber}`;
+                ? `${SYSTEM_PROMPT}${ragContext}${classifierHint}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
+                : `${SYSTEM_PROMPT}${ragContext}${classifierHint}\nرقم العميل: ${phoneNumber}`;
 
             const messages = [
                 { role: 'system', content: systemNote },

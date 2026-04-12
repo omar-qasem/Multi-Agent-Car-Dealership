@@ -74,6 +74,14 @@ const SERVICE_TYPES = {
 
 const BRANCHES = ['عمان', 'إربد', 'الزرقاء', 'العقبة'];
 
+const FUEL_TYPES = {
+    'كهربا': 'كهربائي', 'كهربائي': 'كهربائي', 'كهربائية': 'كهربائي',
+    'electric': 'كهربائي', 'ev': 'كهربائي',
+    'هجين': 'هجين', 'هايبرد': 'هجين', 'hybrid': 'هجين',
+    'بنزين': 'بنزين', 'petrol': 'بنزين', 'gasoline': 'بنزين',
+    'ديزل': 'ديزل', 'diesel': 'ديزل',
+};
+
 // =============================================
 // Greeting / FAQ patterns (Arabic + English)
 // =============================================
@@ -240,6 +248,14 @@ function extractBudget(text) {
     return null;
 }
 
+function extractFuelType(text) {
+    const lower = normalize(text).toLowerCase();
+    for (const [keyword, canonical] of Object.entries(FUEL_TYPES)) {
+        if (lower.includes(keyword.toLowerCase())) return canonical;
+    }
+    return null;
+}
+
 // Helper: returns true if any strong intent keyword is present.
 function hasStrongIntentKeyword(text) {
     for (const re of Object.values(INTENT_PATTERNS)) {
@@ -280,6 +296,7 @@ function classify(text) {
     const branch = extractBranch(norm);         if (branch)  entities.branch = branch;
     const date = extractDate(norm);             if (date)    entities.date = date;
     const budget = extractBudget(norm);         if (budget)  entities.budget = budget;
+    const fuel = extractFuelType(norm);          if (fuel)    entities.fuel_type = fuel;
 
     // 1. Greetings — very high confidence canned response.
     //    Guards: short message AND no strong intent keyword present.
@@ -356,4 +373,5 @@ module.exports = {
     extractBranch,
     extractDate,
     extractBudget,
+    extractFuelType,
 };
