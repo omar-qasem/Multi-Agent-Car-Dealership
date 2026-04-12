@@ -24,7 +24,7 @@ const SYSTEM_PROMPT = `أنت "أبو الزوز" 🚗 مساعد أوتو جو�
 - اهتمام بشراء → create_purchase_inquiry
 - يبدو غاضب / يطلب موظف → submit_support_ticket
 
-**ممنوع إعطاء سعر أو تأكيد حجز بدون استدعاء الأداة أولاً.**
+**ممنوع تخمين سعر أو تأكيد حجز.** إذا في "بيانات من المخزون" أدناه، اعتمد عليها مباشرة. إذا ما في، استدعِ الأداة أولاً.
 
 ## قاعدة تدفّق النوايا — حاسمة:
 - بمجرد ما تتحدد النية (حجز/شراء/استفسار) **لا تغيّر الموضوع أبداً** حتى لو المعلومات ناقصة.
@@ -174,6 +174,7 @@ class GeminiService {
             if (!this.client) return this._fallbackResponse(userMessage, startTime);
 
             // Mirror to in-memory Map for hot-path reads in same instance
+            this._evictOldestIfFull();
             this.conversationHistory.set(phoneNumber, history);
             this.conversationLastAccess.set(phoneNumber, Date.now());
 

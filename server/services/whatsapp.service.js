@@ -25,6 +25,15 @@ class WhatsAppService {
    * @returns {object} - استجابة API
    */
   async sendTextMessage(to, message) {
+    // WhatsApp Cloud API enforces a 4096-character limit per text message.
+    // Truncate gracefully to avoid API rejection.
+    const MAX_WA_CHARS = 4096;
+    let body = message || '';
+    if (body.length > MAX_WA_CHARS) {
+      body = body.substring(0, MAX_WA_CHARS - 40) + '\n\n... للمزيد اتصل 06-5000001';
+      logger.warn(`⚠️ Message truncated from ${message.length} to ${body.length} chars`);
+    }
+
     const payload = {
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
@@ -32,7 +41,7 @@ class WhatsAppService {
       type: 'text',
       text: {
         preview_url: false,
-        body: message,
+        body,
       },
     };
 

@@ -514,7 +514,9 @@ async function executeTool(toolName, args, customerPhone) {
       case 'check_availability': {
         const { make, model, year, branch } = args;
 
-        const allMatches = await db.searchCars({ make, model, year, branch });
+        // Use status:'all' + high limit so we get accurate counts
+        // (default searchCars only returns 'available' with limit 10)
+        const allMatches = await db.searchCars({ make, model, year, branch, status: 'all', limit: 50 });
         const available = allMatches.filter(c => c.status === 'available');
         const reserved = allMatches.filter(c => c.status === 'reserved');
 

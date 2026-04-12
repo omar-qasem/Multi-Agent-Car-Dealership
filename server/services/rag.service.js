@@ -39,17 +39,18 @@ async function retrieveContext(intent, entities, convEntities = {}) {
     // Merge current + conversation entities (current wins)
     const e = { ...convEntities, ...entities };
 
+    let timer;
     try {
-        const result = await Promise.race([
-            _retrieve(intent, e),
-            new Promise((_, rej) =>
-                setTimeout(() => rej(new Error('RAG retrieval timed out')), RETRIEVAL_TIMEOUT_MS)
-            ),
-        ]);
+        const timeoutPromise = new Promise((_, rej) => {
+            timer = setTimeout(() => rej(new Error('RAG retrieval timed out')), RETRIEVAL_TIMEOUT_MS);
+        });
+        const result = await Promise.race([_retrieve(intent, e), timeoutPromise]);
         return result;
     } catch (err) {
         logger.warn(`⚠️ RAG retrieval failed: ${err.message}`);
         return null; // Non-critical — LLM still has tools
+    } finally {
+        clearTimeout(timer);
     }
 }
 

@@ -75,14 +75,22 @@ async function step(name, fn, { critical = false, timeoutMs = null } = {}) {
     const t0 = Date.now();
     try {
         const promise = Promise.resolve().then(fn);
-        const result = timeoutMs
-            ? await Promise.race([
-                promise,
-                new Promise((_, rej) =>
-                    setTimeout(() => rej(new Error(`step "${name}" timed out after ${timeoutMs}ms`)), timeoutMs)
-                ),
-            ])
-            : await promise;
+        let result;
+        if (timeoutMs) {
+            // FIX: Clear the timeout when the main promise settles first,
+            // preventing an unhandled rejection from the losing timeout promise.
+            let timer;
+            const timeoutPromise = new Promise((_, rej) => {
+                timer = setTimeout(() => rej(new Error(`step "${name}" timed out after ${timeoutMs}ms`)), timeoutMs);
+            });
+            try {
+                result = await Promise.race([promise, timeoutPromise]);
+            } finally {
+                clearTimeout(timer);
+            }
+        } else {
+            result = await promise;
+        }
         const dt = Date.now() - t0;
         console.log(`[STEP] ✅ ${name} ok (${dt}ms)`);
         return { ok: true, result, ms: dt };
@@ -98,10 +106,12 @@ async function step(name, fn, { critical = false, timeoutMs = null } = {}) {
 }
 
 // Hard timeouts (must leave headroom under Netlify's 10s function limit)
+// Netlify Functions have a 26s max (not 10s — that's API Gateway, not Netlify).
+// Meta retries at ~20s. We budget: 2s parse/read + 12s AI + 3s send + 3s save = 20s.
 const TIMEOUTS = {
     markAsRead:  2000,
     customerOp: 3000,
-    aiCall:     7000,   // Groq usually 1–3s; cap at 7s so we still have time to send fallback
+    aiCall:    12000,   // Groq 1–3s + RAG 1.5s + tool loops = need headroom
     sendMsg:    3000,
     saveConv:   3000,
 };

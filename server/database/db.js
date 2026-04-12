@@ -207,8 +207,11 @@ function getDbMode() {
 // CARS
 // =============================================
 async function searchCars(filters = {}) {
+  const maxResults = filters.limit || 10; // Default 10; callers can override (e.g. check_availability uses 50)
   if (useSupabase) {
-    let q = supabase.from('cars').select('*').eq('status', 'available');
+    let q = supabase.from('cars').select('*');
+    // Allow callers to opt out of the status filter (for availability counts)
+    if (filters.status !== 'all') q = q.eq('status', filters.status || 'available');
     if (filters.make)      q = q.ilike('make', `%${filters.make}%`);
     if (filters.model)     q = q.ilike('model', `%${filters.model}%`);
     if (filters.year)      q = q.eq('year', parseInt(filters.year));
@@ -216,11 +219,12 @@ async function searchCars(filters = {}) {
     if (filters.max_price) q = q.lte('price', filters.max_price);
     if (filters.branch)    q = q.ilike('branch', `%${filters.branch}%`);
     if (filters.fuel_type) q = q.ilike('fuel_type', `%${filters.fuel_type}%`);
-    const { data, error } = await q.limit(5);
+    const { data, error } = await q.limit(maxResults);
     if (error) sbThrow('searchCars', error);
     return data || [];
   }
-  let results = mem.cars.filter(c => c.status === 'available');
+  let results = mem.cars;
+  if (filters.status !== 'all') results = results.filter(c => c.status === (filters.status || 'available'));
   if (filters.make)      results = results.filter(c => c.make.toLowerCase().includes(filters.make.toLowerCase()));
   if (filters.model)     results = results.filter(c => c.model.toLowerCase().includes(filters.model.toLowerCase()));
   if (filters.year)      results = results.filter(c => c.year === parseInt(filters.year));
@@ -228,7 +232,7 @@ async function searchCars(filters = {}) {
   if (filters.max_price) results = results.filter(c => c.price <= filters.max_price);
   if (filters.branch)    results = results.filter(c => (c.branch || '').includes(filters.branch));
   if (filters.fuel_type) results = results.filter(c => (c.fuel_type || '').includes(filters.fuel_type));
-  return results.slice(0, 5);
+  return results.slice(0, maxResults);
 }
 
 async function getCarById(id) {
@@ -999,12 +1003,16 @@ async function getAllBranches() {
 }
 
 async function getActivePromotions() {
+  const today = new Date().toISOString().split('T')[0];
   if (useSupabase) {
-    const { data, error } = await supabase.from('promotions').select('*').eq('active', true);
+    const { data, error } = await supabase
+      .from('promotions')
+      .select('*')
+      .eq('active', true)
+      .or(`valid_until.is.null,valid_until.gte.${today}`);
     if (error) sbThrow('getActivePromotions', error);
     return data || [];
   }
-  const today = new Date().toISOString().split('T')[0];
   return mem.promotions.filter(p => p.active !== false && (!p.valid_until || p.valid_until >= today));
 }
 
