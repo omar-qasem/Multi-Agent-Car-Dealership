@@ -14,8 +14,10 @@ class WhatsAppService {
       'Authorization': `Bearer ${config.whatsapp.token}`,
       'Content-Type': 'application/json',
     };
-    this.retryAttempts = 3;
-    this.retryDelay = 1000; // 1 ثانية
+    // Serverless (Netlify): 26s hard limit — keep retries minimal
+    // 2 attempts × 500ms base delay = worst case ~1.5s extra, not 6s
+    this.retryAttempts = 2;
+    this.retryDelay = 500;
   }
 
   /**

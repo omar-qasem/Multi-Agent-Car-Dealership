@@ -12,6 +12,15 @@ const { authenticateToken, addToBlacklist, removeFromBlacklist, getBlacklist } =
 const logger = require('../utils/logger');
 
 /**
+ * Validate international phone number format (E.164-like)
+ * Allows 7-15 digits, optional leading +
+ */
+const PHONE_REGEX = /^\+?\d{7,15}$/;
+function isValidPhone(phone) {
+    return typeof phone === 'string' && PHONE_REGEX.test(phone.trim());
+}
+
+/**
  * GET /api/conversations - كل المحادثات مجمعة
  */
 router.get('/', authenticateToken, async (req, res) => {
@@ -35,7 +44,7 @@ router.get('/', authenticateToken, async (req, res) => {
         res.json({ success: true, count: result.length, data: result });
     } catch (error) {
         logger.error('❌ خطأ في جلب المحادثات:', error);
-        res.status(500).json({ success: false, message: error.message });
+        res.status(500).json({ success: false, message: 'فشل في جلب المحادثات' });
     }
 });
 
@@ -48,8 +57,14 @@ router.post('/send', authenticateToken, async (req, res) => {
         if (!to || !message) {
             return res.status(400).json({ success: false, message: 'رقم الهاتف والرسالة مطلوبان' });
         }
+        if (!isValidPhone(to)) {
+            return res.status(400).json({ success: false, message: 'صيغة رقم الهاتف غير صحيحة — يجب 7-15 رقم بصيغة دولية' });
+        }
+        if (message.length > 4096) {
+            return res.status(400).json({ success: false, message: 'الرسالة طويلة جداً — الحد الأقصى 4096 حرف' });
+        }
 
-        const result = await whatsappService.sendTextMessage(to, message);
+        const result = await whatsappService.sendTextMessage(to.trim(), message);
 
         await db.saveConversation({
             phone_number: to,
@@ -67,7 +82,7 @@ router.post('/send', authenticateToken, async (req, res) => {
         res.json({ success: true, messageId: result.messageId });
     } catch (error) {
         logger.error('❌ خطأ في إرسال الرسالة:', error);
-        res.status(500).json({ success: false, message: error.message });
+        res.status(500).json({ success: false, message: 'فشل في إرسال الرسالة' });
     }
 });
 
@@ -82,7 +97,8 @@ router.get('/:phone', authenticateToken, async (req, res) => {
         }
         res.json({ success: true, phoneNumber: req.params.phone, count: messages.length, messages });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        logger.error('❌ خطأ في جلب محادثات الرقم:', error);
+        res.status(500).json({ success: false, message: 'فشل في جلب المحادثات' });
     }
 });
 
@@ -92,7 +108,8 @@ router.get('/:phone', authenticateToken, async (req, res) => {
 router.post('/blacklist', authenticateToken, (req, res) => {
     const { phoneNumber } = req.body;
     if (!phoneNumber) return res.status(400).json({ success: false, message: 'رقم الهاتف مطلوب' });
-    addToBlacklist(phoneNumber);
+    if (!isValidPhone(phoneNumber)) return res.status(400).json({ success: false, message: 'صيغة رقم الهاتف غير صحيحة' });
+    addToBlacklist(phoneNumber.trim());
     res.json({ success: true, message: `تم حظر الرقم ${phoneNumber}` });
 });
 

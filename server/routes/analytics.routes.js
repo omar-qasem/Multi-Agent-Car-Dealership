@@ -111,7 +111,7 @@ router.get('/', authenticateToken, async (req, res) => {
         });
     } catch (error) {
         logger.error('❌ خطأ في التحليلات:', error);
-        res.status(500).json({ success: false, message: error.message });
+        res.status(500).json({ success: false, message: 'فشل في جلب التحليلات' });
     }
 });
 
@@ -133,7 +133,8 @@ router.get('/summary', authenticateToken, async (req, res) => {
             },
         });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        logger.error('❌ خطأ في الملخص:', error);
+        res.status(500).json({ success: false, message: 'فشل في جلب الملخص' });
     }
 });
 
@@ -161,7 +162,8 @@ router.get('/export', authenticateToken, async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="autojordan_conversations_${Date.now()}.csv"`);
         res.send(csv);
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        logger.error('❌ خطأ في التصدير:', error);
+        res.status(500).json({ success: false, message: 'فشل في تصدير البيانات' });
     }
 });
 
@@ -173,7 +175,8 @@ router.get('/dashboard', authenticateToken, async (req, res) => {
         const stats = await db.getDashboardStats();
         res.json({ success: true, data: stats });
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        logger.error('❌ خطأ في الداشبورد:', error);
+        res.status(500).json({ success: false, message: 'فشل في جلب بيانات الداشبورد' });
     }
 });
 

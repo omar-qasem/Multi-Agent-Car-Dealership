@@ -8,12 +8,22 @@ const rateLimit = require('express-rate-limit');
 const config = require('../config/env');
 const logger = require('../utils/logger');
 
-// بيانات الدخول من المتغيرات البيئية (مع قيم افتراضية آمنة للتطوير فقط)
+// بيانات الدخول من المتغيرات البيئية
+// In production: MUST be set — no defaults allowed
+// In development: fallback to insecure defaults with loud warning
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+if (IS_PRODUCTION && (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD)) {
+  // Hard crash — do NOT start with default creds in production
+  console.error('🚫 FATAL: ADMIN_USERNAME and ADMIN_PASSWORD must be set in production. Refusing to start with insecure defaults.');
+  throw new Error('Missing ADMIN_USERNAME / ADMIN_PASSWORD in production environment');
+}
+
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
 if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) {
-  console.error('⚠️  WARNING: ADMIN_USERNAME and ADMIN_PASSWORD not set in .env — using insecure defaults!');
+  console.error('⚠️  WARNING: ADMIN_USERNAME and ADMIN_PASSWORD not set in .env — using insecure defaults (dev only)!');
 }
 
 if (process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.length < 8) {

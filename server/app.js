@@ -55,7 +55,12 @@ app.use(cors({
         if (!origin) return cb(null, true);
         // Allow whitelisted origins
         if (allowedOrigins.length > 0 && allowedOrigins.includes(origin)) return cb(null, true);
-        // In production with no CORS_ORIGIN set, allow all (Netlify same-origin handles security)
+        // In production with no CORS_ORIGIN set, reject cross-origin requests
+        if (allowedOrigins.length === 0 && config.server.nodeEnv === 'production') {
+            logger.warn(`❌ CORS blocked (no CORS_ORIGIN configured): ${origin}`);
+            return cb(new Error('CORS policy violation — set CORS_ORIGIN env var'));
+        }
+        // In dev with no allowedOrigins, allow all
         if (allowedOrigins.length === 0) return cb(null, true);
         logger.warn(`❌ CORS blocked origin: ${origin}`);
         return cb(new Error('CORS policy violation'));
@@ -109,8 +114,12 @@ app.get('/health', async (req, res) => {
     });
 });
 
-// Debug endpoint
+// Debug endpoint — protected: requires auth in production, dev-only otherwise
 app.get('/debug-env', (req, res) => {
+    // Block entirely in production — no config info should ever leak
+    if (config.server.nodeEnv === 'production') {
+        return res.status(404).json({ success: false, message: 'Not found' });
+    }
     const mode = getDbMode();
     res.json({
         VERIFY_TOKEN_SET:   !!process.env.WHATSAPP_VERIFY_TOKEN,
@@ -121,7 +130,7 @@ app.get('/debug-env', (req, res) => {
         IS_NETLIFY:         !!process.env.NETLIFY,
         SUPABASE_URL_SET:   !!process.env.SUPABASE_URL,
         SUPABASE_KEY_SET:   !!process.env.SUPABASE_SERVICE_KEY,
-        DB_MODE:            mode.mode,         // real mode, not just env-var presence
+        DB_MODE:            mode.mode,
         DB_PERSISTENT:      mode.persistent,
     });
 });
@@ -146,14 +155,18 @@ if (config.server.nodeEnv === 'production' && !process.env.NETLIFY) {
     });
 }
 
-// Error Handler — always include error.message to aid debugging on Netlify
+// Error Handler — hide internals in production, show details in dev
 app.use((err, req, res, next) => {
     logger.error('❌ خطأ غير متوقع:', err.message || err);
-    res.status(500).json({
+    const response = {
         success: false,
         message: 'حدث خطأ داخلي في النظام',
-        error: err.message || 'Unknown error',
-    });
+    };
+    // Only expose error details in development — never leak stack/message in production
+    if (config.server.nodeEnv !== 'production') {
+        response.error = err.message || 'Unknown error';
+    }
+    res.status(500).json(response);
 });
 
 // 404
