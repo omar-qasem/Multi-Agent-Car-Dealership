@@ -1,0 +1,359 @@
+/**
+ * أوتو جوردن - Fast Intent Classifier
+ *
+ * Pre-LLM classifier that runs in <1ms and answers two questions:
+ *   1. Can we answer this with a canned response? (skips the LLM entirely)
+ *   2. What entities did the user mention? (so the LLM doesn't re-extract)
+ *
+ * Why: Calling Groq for every "هلا" or "وين فرعكم بعمان" wastes ~1.5s
+ * per message and burns tokens. Classifier handles ~30-40% of traffic.
+ *
+ * Returns:
+ *   {
+ *     intent: 'greeting' | 'faq_hours' | 'faq_branches' | 'faq_phone'
+ *           | 'booking' | 'purchase' | 'support' | 'parts' | 'price'
+ *           | 'unknown',
+ *     confidence: 0..1,
+ *     cannedResponse: string | null,    // if non-null, skip the LLM
+ *     entities: {
+ *       car_make?: string,
+ *       car_model?: string,
+ *       service_type?: string,
+ *       date?: string,
+ *       branch?: string,
+ *       budget?: number,
+ *     },
+ *   }
+ */
+
+// =============================================
+// Canonical entity dictionaries
+// =============================================
+const CAR_MAKES = {
+    'تويوتا': 'Toyota',  'toyota': 'Toyota',
+    'هيونداي': 'Hyundai', 'hyundai': 'Hyundai',
+    'كيا': 'Kia',        'kia': 'Kia',
+    'نيسان': 'Nissan',   'nissan': 'Nissan',
+    'mg': 'MG',          'ام جي': 'MG', 'إم جي': 'MG',
+    'شيري': 'Chery',     'chery': 'Chery',
+    'بي ام': 'BMW',      'bmw': 'BMW', 'بي ام دبليو': 'BMW',
+};
+
+// Two lists: Arabic models (substring-safe because they're long) and
+// short ASCII models that need word-boundary matching to avoid false hits
+// inside unrelated text.
+const CAR_MODELS_AR = [
+    'كامري', 'كورولا', 'لاندكروزر', 'راف فور',
+    'توسان', 'النترا', 'سانتافي',
+    'سبورتاج', 'سيراتو',
+    'سني', 'التيما',
+    'تيجو',
+];
+const CAR_MODELS_EN = [
+    'Camry', 'Corolla', 'Land Cruiser', 'RAV4',
+    'Tucson', 'Elantra', 'Santa Fe',
+    'Sportage', 'Cerato',
+    'Sunny', 'Altima',
+    '320i', 'Tiggo', 'ZS', 'HS',
+];
+
+const SERVICE_TYPES = {
+    'صيانة': 'صيانة دورية',
+    'سيرفس': 'صيانة دورية',
+    'تغيير زيت': 'تغيير زيت',
+    'فحص': 'فحص شامل',
+    'برمجة': 'برمجة',
+    'كهرباء': 'كهرباء',
+    'ميكانيك': 'ميكانيك',
+    'سمكرة': 'سمكرة ودهان',
+    'دهان': 'سمكرة ودهان',
+    'مكيف': 'صيانة مكيف',
+    'فرامل': 'فرامل',
+    'بريك': 'فرامل',
+};
+
+const BRANCHES = ['عمان', 'إربد', 'الزرقاء', 'العقبة'];
+
+// =============================================
+// Greeting / FAQ patterns (Arabic + English)
+// =============================================
+const GREETING_PATTERNS = /^(?:[\s!?.,👋🙋🤝🌟✨]*)(هلا|مرحبا|السلام|هاي|اهلا|أهلا|hi|hello|hey|صباح|مساء)/i;
+
+// Negation prefixes — if any of these appear right before an intent verb,
+// the intent should NOT fire. ("ما بدي احجز" must not be tagged as booking.)
+const NEGATION_REGEX = /\b(ما|مش|مو|لا)\s+/i;
+
+const FAQ_PATTERNS = [
+    {
+        intent: 'faq_hours',
+        regex: /(?:ساعات|دوام|متى\s+تفتح|متى\s+بتفتح|بأي\s+وقت|بكم\s+الساعة|hours|opening)/i,
+        response:
+            'ساعات دوامنا 🕐\n' +
+            '• الأحد - الخميس: 8 صباحاً - 8 مساءً\n' +
+            '• الجمعة: 8 صباحاً - 2 ظهراً\n' +
+            '• السبت: 8 صباحاً - 6 مساءً\n\n' +
+            'كل أفرعنا (عمان، إربد، الزرقاء، العقبة) بنفس الدوام.',
+    },
+    {
+        intent: 'faq_branches',
+        regex: /(?:كم\s+فرع|أفرعكم|الأفرع|وين\s+فروعكم|عناوين|عنوان\s+الفرع|locations?|branches?)/i,
+        response:
+            'عنا 4 أفرع 📍\n' +
+            '1️⃣ عمان (الرئيسي) - شارع المدينة المنورة\n' +
+            '2️⃣ إربد - شارع الجامعة\n' +
+            '3️⃣ الزرقاء - شارع الأمير محمد\n' +
+            '4️⃣ العقبة - شارع الملك الحسين\n\n' +
+            'تلفون موحد: 06-5000001',
+    },
+    {
+        intent: 'faq_phone',
+        regex: /(?:رقم\s+التلفون|تلفون|تليفون|رقمكم|كيف\s+اتواصل|phone|contact)/i,
+        response:
+            'تلفوننا 📞\n' +
+            '06-5000001\n\n' +
+            'متوفرين على واتساب طول أوقات الدوام.',
+    },
+    {
+        intent: 'faq_payment',
+        regex: /(?:طرق\s+الدفع|كيف\s+(?:ادفع|أدفع)|بتقبلوا\s+تقسيط|بتقسطوا|payment\s+methods?|installment\s+options)/i,
+        response:
+            'طرق الدفع المتاحة 💳\n' +
+            '• كاش\n' +
+            '• بطاقة (فيزا/ماستر)\n' +
+            '• تحويل بنكي\n' +
+            '• تقسيط حتى 60 شهر (شروط البنك)\n\n' +
+            'بدك تفاصيل التقسيط لسيارة معينة؟',
+    },
+];
+
+// =============================================
+// Strong intent keywords
+// =============================================
+const INTENT_PATTERNS = {
+    booking:  /(?:بدي\s+(?:أحجز|احجز|حجز)|حجز\s+(?:صيانة|موعد)|أحجز\s+موعد|book|appointment)/i,
+    purchase: /(?:بدي\s+(?:أشتري|اشتري|سيارة\s+جديدة)|شو\s+عندكم\s+(?:سيارات|موديل)|أبغى\s+سيارة|buy\s+(?:a\s+)?car)/i,
+    support:  /(?:بدي\s+(?:أحكي|احكي)\s+مع\s+(?:حدا|موظف|مدير)|شكوى|complaint|talk\s+to\s+(?:agent|human|manager))/i,
+    parts:    /(?:قطعة|قطع\s+غيار|سبير|spare\s+part|بدي\s+(?:فلتر|بطارية|إطار|بريك))/i,
+    price:    /(?:كم\s+سعر|بكم|شو\s+سعر|اسعار|أسعار|سعر\s+ال|how\s+much|price\s+of)/i,
+};
+
+// =============================================
+// Text normalization
+// =============================================
+// Strips Tatweel (ـ), ZWNJ, control chars, and collapses whitespace.
+// Critical: WhatsApp users sometimes paste with these characters and they
+// silently break substring matching.
+function normalize(text) {
+    if (!text) return '';
+    return text
+        .replace(/[\u0640]/g, '')           // Tatweel
+        .replace(/[\u200B-\u200F]/g, '')    // ZWNJ, ZWJ, marks
+        .replace(/[\u064B-\u0652]/g, '')    // Arabic diacritics (tashkeel)
+        // Convert Arabic-Indic numerals (٠١٢٣٤٥٦٧٨٩) to Western Arabic (0123456789)
+        .replace(/[\u0660-\u0669]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x0660 + 48))
+        // Convert Extended Arabic-Indic numerals (۰۱۲۳۴۵۶۷۸۹) — Farsi/Urdu keyboards
+        .replace(/[\u06F0-\u06F9]/g, d => String.fromCharCode(d.charCodeAt(0) - 0x06F0 + 48))
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// =============================================
+// Entity extractors
+// =============================================
+function extractCarMake(text) {
+    const lower = normalize(text).toLowerCase();
+    for (const [keyword, canonical] of Object.entries(CAR_MAKES)) {
+        if (lower.includes(keyword.toLowerCase())) return canonical;
+    }
+    return null;
+}
+
+function extractCarModel(text) {
+    const norm = normalize(text);
+    const lower = norm.toLowerCase();
+    // Arabic models — substring is safe (long enough, no false positives)
+    for (const model of CAR_MODELS_AR) {
+        if (lower.includes(model.toLowerCase())) return model;
+    }
+    // ASCII models — require word boundaries to avoid matching inside other words
+    for (const model of CAR_MODELS_EN) {
+        const escaped = model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?:[^A-Za-z0-9]|$)`, 'i');
+        if (re.test(norm)) return model;
+    }
+    return null;
+}
+
+function extractServiceType(text) {
+    const lower = normalize(text).toLowerCase();
+    for (const [keyword, canonical] of Object.entries(SERVICE_TYPES)) {
+        if (lower.includes(keyword.toLowerCase())) return canonical;
+    }
+    return null;
+}
+
+function extractBranch(text) {
+    const lower = normalize(text).toLowerCase();
+    for (const b of BRANCHES) {
+        if (lower.includes(b.toLowerCase())) return b;
+    }
+    return null;
+}
+
+function extractDate(text) {
+    // Natural-language date hints in Arabic.
+    // NOTE: We avoid \b boundaries with Arabic — they don't behave reliably.
+    const norm = normalize(text);
+    if (/بعد\s+بكر[اةه]?/.test(norm)) return 'بعد بكرا';
+    if (/اليوم/.test(norm)) return 'اليوم';
+    if (/بكر[اةه]?|غد[اًا]|tomorrow/i.test(norm)) return 'بكرا';
+    const dayMatch = norm.match(/(الأحد|الاحد|الإثنين|الاثنين|الثلاثاء|الأربعاء|الاربعاء|الخميس|الجمعة|السبت)/);
+    if (dayMatch) return dayMatch[1];
+    // ISO patterns
+    const iso = norm.match(/(\d{4}-\d{2}-\d{2})/);
+    if (iso) return iso[1];
+    return null;
+}
+
+function extractBudget(text) {
+    const norm = normalize(text);
+    // Pattern A: explicit thousand marker — "15 الف", "20k", "12 ألف"
+    // NOTE: \b doesn't work after Arabic chars in JS. Use lookahead instead.
+    const withMarker = norm.match(/(\d{1,3}(?:[\s,]?\d{3})?)\s*(?:الف|ألف|آلاف|k(?=[^a-z]|$))/i);
+    if (withMarker) {
+        let n = parseInt(withMarker[1].replace(/[\s,]/g, ''), 10);
+        if (n < 1000) n *= 1000;
+        if (n >= 1000 && n <= 1000000) return n;
+    }
+    // Pattern B: standalone large number near budget context — "ميزانيتي 12000"
+    const ctxPatterns = [
+        /(?:ميزاني[تة]ي?|ميزانية|بحدود|على\s+حدود|تحت|اقل\s+من|أقل\s+من|حوالي|تقريبا)\s*(\d{4,6})/i,
+        /(\d{4,6})\s*(?:دينار|jod|دك)/i,
+    ];
+    for (const re of ctxPatterns) {
+        const m = norm.match(re);
+        if (m) {
+            const n = parseInt(m[1], 10);
+            if (n >= 1000 && n <= 1000000) return n;
+        }
+    }
+    return null;
+}
+
+// Helper: returns true if any strong intent keyword is present.
+function hasStrongIntentKeyword(text) {
+    for (const re of Object.values(INTENT_PATTERNS)) {
+        if (re.test(text)) return true;
+    }
+    return false;
+}
+
+// Helper: returns true if a regex match is in a negated context.
+// We check the substring just BEFORE the matched verb.
+function isNegated(text, matchIndex) {
+    if (matchIndex == null || matchIndex < 0) return false;
+    // Look at the 12 chars preceding the match — enough room for "ما " / "مش "
+    const before = text.slice(Math.max(0, matchIndex - 12), matchIndex);
+    return /(?:^|[\s،,.!?])(?:ما|مش|مو|لا)\s+$/.test(before);
+}
+
+// =============================================
+// Main classifier
+// =============================================
+function classify(text) {
+    const empty = {
+        intent: 'unknown',
+        confidence: 0,
+        cannedResponse: null,
+        entities: {},
+    };
+
+    if (!text || typeof text !== 'string') return empty;
+    const norm = normalize(text);
+    if (!norm) return empty;
+
+    // Always extract entities — useful even when intent is unclear
+    const entities = {};
+    const make = extractCarMake(norm);          if (make)    entities.car_make = make;
+    const model = extractCarModel(norm);        if (model)   entities.car_model = model;
+    const service = extractServiceType(norm);   if (service) entities.service_type = service;
+    const branch = extractBranch(norm);         if (branch)  entities.branch = branch;
+    const date = extractDate(norm);             if (date)    entities.date = date;
+    const budget = extractBudget(norm);         if (budget)  entities.budget = budget;
+
+    // 1. Greetings — very high confidence canned response.
+    //    Guards: short message AND no strong intent keyword present.
+    //    Otherwise "هلا بدي احجز صيانة" would be hijacked by the greeting.
+    if (
+        GREETING_PATTERNS.test(norm) &&
+        norm.length < 25 &&
+        !hasStrongIntentKeyword(norm) &&
+        !service && !date && !budget
+    ) {
+        return {
+            intent: 'greeting',
+            confidence: 0.99,
+            cannedResponse:
+                'هلا والله! أهلين فيك بأوتو جوردن 🚗\n' +
+                'كيف بقدر أساعدك اليوم؟\n\n' +
+                '1️⃣ سيارات للبيع\n' +
+                '2️⃣ قطع غيار\n' +
+                '3️⃣ حجز صيانة\n' +
+                '4️⃣ عروض حالية\n' +
+                '5️⃣ أحكي مع موظف',
+            entities,
+        };
+    }
+
+    // 2. FAQ — high confidence, skip the LLM
+    for (const faq of FAQ_PATTERNS) {
+        if (faq.regex.test(norm)) {
+            return {
+                intent: faq.intent,
+                confidence: 0.95,
+                cannedResponse: faq.response,
+                entities,
+            };
+        }
+    }
+
+    // 3. Strong intent keywords — DON'T skip the LLM, but tag the intent
+    //    so downstream code can validate / route correctly.
+    //    Negation aware: "ما بدي احجز" must NOT fire booking intent.
+    for (const [intent, regex] of Object.entries(INTENT_PATTERNS)) {
+        const m = regex.exec(norm);
+        if (m && !isNegated(norm, m.index)) {
+            return {
+                intent,
+                confidence: 0.85,
+                cannedResponse: null,
+                entities,
+            };
+        }
+    }
+
+    // 4. Inferred booking: service_type + date but no explicit "بدي احجز".
+    //    Example: "تغيير زيت بكرا الساعة 10". Strong enough signal.
+    if (service && date) {
+        return {
+            intent: 'booking',
+            confidence: 0.75,
+            cannedResponse: null,
+            entities,
+        };
+    }
+
+    // 5. No strong signal — let the LLM handle it
+    return { intent: 'unknown', confidence: 0, cannedResponse: null, entities };
+}
+
+module.exports = {
+    classify,
+    normalize,
+    extractCarMake,
+    extractCarModel,
+    extractServiceType,
+    extractBranch,
+    extractDate,
+    extractBudget,
+};

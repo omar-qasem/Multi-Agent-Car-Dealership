@@ -7,6 +7,7 @@ const Groq = require('groq-sdk');
 const logger = require('../utils/logger');
 const { TOOL_DEFINITIONS, executeTool } = require('./agent-tools');
 const db = require('../database/db');
+const { classify } = require('./classifier');
 
 // =============================================
 // System Prompt — مختصر ومركّز للسرعة
@@ -109,10 +110,14 @@ class GeminiService {
         const startTime = Date.now();
 
         try {
-            if (!this.client) return this._fallbackResponse(userMessage, startTime);
+            // ── 0. Fast Intent Classifier (<1ms) ────────────────────
+            // Handles greetings & FAQs with canned responses (skips LLM).
+            // For other intents, extracts entities and tags the intent so
+            // the LLM gets a head start.
+            const classification = classify(userMessage);
+            logger.info(`🏷️ Classifier: intent=${classification.intent} conf=${classification.confidence} entities=${JSON.stringify(classification.entities)}`);
 
             // ── Load persisted conversation state from Supabase ─────
-            // Falls back to in-memory Map if Supabase is unavailable.
             let history = [];
             let convState = null;
             try {
@@ -124,6 +129,49 @@ class GeminiService {
                 logger.warn(`⚠️ getConversationState failed (using empty history): ${e.message}`);
             }
 
+            // ── Merge classifier entities into conversation state ────
+            // Accumulate entities across turns so "بدي احجز" on turn 1 +
+            // "تويوتا كامري" on turn 2 builds up the full picture.
+            const prevEntities = (convState?.collected_entities && typeof convState.collected_entities === 'object')
+                ? convState.collected_entities
+                : {};
+            const mergedEntities = { ...prevEntities, ...classification.entities };
+
+            // ── Canned response short-circuit ───────────────────────
+            // If the classifier returned a canned response (greeting / FAQ),
+            // skip the LLM entirely — saves ~1.5-3s per message.
+            if (classification.cannedResponse) {
+                // Still save to conversation state + history so context is preserved
+                history.push({ role: 'user', content: userMessage });
+                history.push({ role: 'assistant', content: classification.cannedResponse });
+                while (history.length > this.maxHistory) history.shift();
+
+                try {
+                    await db.saveConversationState(phoneNumber, {
+                        history,
+                        pending_intent:     convState?.pending_intent || null,
+                        collected_entities: mergedEntities,
+                        turn_count:         (convState?.turn_count || 0) + 1,
+                    });
+                } catch (e) {
+                    logger.warn(`⚠️ saveConversationState (canned) failed: ${e.message}`);
+                }
+
+                const responseTime = Date.now() - startTime;
+                logger.info(`⚡ Canned response (${classification.intent}) in ${responseTime}ms`);
+                return {
+                    response: classification.cannedResponse,
+                    responseTime,
+                    toolsUsed: [],
+                    toolCallCount: 0,
+                    escalated: false,
+                    fromCache: true,
+                };
+            }
+
+            // ── Full LLM path ───────────────────────────────────────
+            if (!this.client) return this._fallbackResponse(userMessage, startTime);
+
             // Mirror to in-memory Map for hot-path reads in same instance
             this.conversationHistory.set(phoneNumber, history);
             this.conversationLastAccess.set(phoneNumber, Date.now());
@@ -134,9 +182,23 @@ class GeminiService {
             while (history.length > this.maxHistory) history.shift();
 
             // ── Build messages ──────────────────────────────────────
+            // Inject classifier context so the LLM doesn't waste tokens re-extracting
+            let classifierHint = '';
+            if (classification.intent !== 'unknown') {
+                classifierHint += `\n\n## سياق المصنّف (classifier context):`;
+                classifierHint += `\n- النية المكتشفة: ${classification.intent} (ثقة: ${classification.confidence})`;
+                if (convState?.pending_intent && convState.pending_intent !== classification.intent) {
+                    classifierHint += `\n- نية معلّقة من الرسالة السابقة: ${convState.pending_intent}`;
+                }
+            }
+            if (Object.keys(mergedEntities).length > 0) {
+                classifierHint += `\n- الكيانات المستخرجة (تراكمي): ${JSON.stringify(mergedEntities)}`;
+                classifierHint += `\n- استخدم هذه الكيانات مباشرة عند استدعاء الأدوات — لا تسأل المستخدم عنها مرة ثانية.`;
+            }
+
             const systemNote = customerName
-                ? `${SYSTEM_PROMPT}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
-                : `${SYSTEM_PROMPT}\nرقم العميل: ${phoneNumber}`;
+                ? `${SYSTEM_PROMPT}${classifierHint}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
+                : `${SYSTEM_PROMPT}${classifierHint}\nرقم العميل: ${phoneNumber}`;
 
             const messages = [
                 { role: 'system', content: systemNote },
@@ -214,7 +276,7 @@ class GeminiService {
             while (history.length > this.maxHistory) history.shift();
 
             // ── Persist updated state to Supabase ───────────────────
-            // Detect tool success → clear pending intent (booking confirmed etc.)
+            // Detect tool success → clear pending intent & entities (booking confirmed etc.)
             const completedTools = new Set([
                 'book_maintenance',
                 'submit_support_ticket',
@@ -222,12 +284,18 @@ class GeminiService {
             ]);
             const toolCompleted = toolsUsed.some(t => completedTools.has(t));
 
+            // Resolve pending_intent: if classifier found one, use it;
+            // otherwise carry forward from conversation state (multi-turn).
+            const resolvedIntent = classification.intent !== 'unknown'
+                ? classification.intent
+                : (convState?.pending_intent || null);
+
             const newTurnCount = (convState?.turn_count || 0) + 1;
             try {
                 await db.saveConversationState(phoneNumber, {
                     history,
-                    pending_intent:     toolCompleted ? null : (convState?.pending_intent || null),
-                    collected_entities: toolCompleted ? {} : (convState?.collected_entities || {}),
+                    pending_intent:     toolCompleted ? null : resolvedIntent,
+                    collected_entities: toolCompleted ? {} : mergedEntities,
                     turn_count:         newTurnCount,
                 });
             } catch (e) {
