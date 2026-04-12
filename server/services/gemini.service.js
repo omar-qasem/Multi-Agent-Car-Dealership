@@ -52,13 +52,13 @@ const SYSTEM_PROMPT = `أنت "أبو الزوز" 🚗 مساعد أوتو جو�
 class GeminiService {
     constructor() {
         this.client = null;
-        // LRU conversation history (Map preserves insertion order)
         this.conversationHistory = new Map();
         this.conversationLastAccess = new Map();
-        // Default to 8b-instant for speed; override via env for accuracy
-        this.model = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
-        this.maxHistory = 10;    // Last 5 turns (10 messages) — smaller = faster
-        this.maxToolCalls = 4;   // Hard cap on tool round-trips
+        // llama-3.3-70b-versatile: reliable Arabic function calling
+        // llama-3.1-8b-instant: fast but generates malformed <function=...> tool calls
+        this.model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+        this.maxHistory = 8;     // Last 4 turns — smaller = fewer tokens = faster
+        this.maxToolCalls = 3;   // Hard cap on tool round-trips
         this.MAX_CUSTOMERS = parseInt(process.env.MAX_CONVERSATION_CUSTOMERS) || 10000;
         this.CONVERSATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
         this._initialize();
@@ -107,8 +107,101 @@ class GeminiService {
         }
     }
 
+    /**
+     * Low-level Groq API call with:
+     * - AbortSignal support (pass the generateResponse-level controller)
+     * - Retry once on 429 (wait up to 3s) or connection errors
+     */
+    async _callGroq(params, signal) {
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                return await this.client.chat.completions.create(params, { signal });
+            } catch (err) {
+                // AbortError → outer timeout fired, stop immediately
+                if (err?.name === 'AbortError' || signal?.aborted) throw err;
+
+                const status = err?.status || err?.statusCode;
+
+                // 429 Rate limit — wait up to 3s then retry once
+                if (status === 429 && attempt < 2) {
+                    const waitMs = Math.min(this._parseRetryAfterMs(err?.message), 3000);
+                    logger.warn(`⚠️ Groq rate limit (429) — waiting ${waitMs}ms before retry`);
+                    await new Promise(r => setTimeout(r, waitMs));
+                    continue;
+                }
+
+                // Connection error — retry once immediately
+                if ((err?.message?.toLowerCase().includes('connection') || err?.message?.toLowerCase().includes('network')) && attempt < 2) {
+                    logger.warn(`⚠️ Groq connection error — retrying immediately`);
+                    continue;
+                }
+
+                throw err;
+            }
+        }
+    }
+
+    /** Extract retry-after seconds from Groq 429 error message */
+    _parseRetryAfterMs(message = '') {
+        const m = message.match(/try again in (\d+(?:\.\d+)?)s/);
+        return m ? Math.ceil(parseFloat(m[1])) * 1000 : 2000;
+    }
+
+    /**
+     * When LLM2 (response generation after tool call) times out or fails,
+     * format the tool result directly into Arabic so the user isn't left
+     * with a generic fallback message even though the action succeeded.
+     */
+    _formatToolFallback(toolName, toolResult) {
+        try {
+            const r = typeof toolResult === 'string' ? JSON.parse(toolResult) : toolResult;
+            switch (toolName) {
+                case 'book_maintenance': {
+                    if (r.booking_id || r.id) {
+                        return `✅ تم حجز موعد الصيانة بنجاح!\n📋 رقم الحجز: ${r.booking_id || r.id}\n\nسنتواصل معك للتأكيد. للاستفسار: 06-5000001`;
+                    }
+                    if (r.missing_info) return `بحتاج منك معلومة واحدة: ${r.missing_info} 🙏`;
+                    return `تم استلام طلب الحجز ✅\nسنتواصل معك على رقمك للتأكيد.\nأو اتصل: 06-5000001`;
+                }
+                case 'submit_support_ticket': {
+                    const id = r.ticket_id || r.id;
+                    return `✅ تم فتح تذكرة دعم${id ? ` رقم ${id}` : ''}!\nسيتواصل معك فريقنا قريباً 📱`;
+                }
+                case 'create_purchase_inquiry': {
+                    const id = r.inquiry_id || r.id;
+                    return `✅ تم تسجيل اهتمامك${id ? ` (رقم ${id})` : ''}!\nسيتصل بك أحد مستشارينا خلال 24 ساعة 🚗`;
+                }
+                case 'search_cars': {
+                    const cars = Array.isArray(r) ? r : (r.cars || r.results || []);
+                    if (!cars.length) return 'ما لقيتش سيارات بهالمواصفات 😔\nجرب فلتر ثاني أو اتصل: 06-5000001';
+                    const first = cars[0];
+                    const price = first.price ? ` — ${Number(first.price).toLocaleString()} دينار` : '';
+                    return `وجدت ${cars.length} سيارة! مثال:\n🚗 ${first.make} ${first.model} ${first.year || ''}${price}\n\nللمزيد من الخيارات اتصل: 06-5000001`;
+                }
+                case 'check_parts_inventory': {
+                    if (r.found || r.available) return `✅ القطعة متوفرة — ${r.name || ''} بسعر ${r.price || '?'} دينار`;
+                    return `عذراً، هذه القطعة غير متوفرة حالياً.\nاتصل 06-5000001 للاستيراد 🔩`;
+                }
+                default:
+                    return null; // no template for this tool — let outer fallback handle it
+            }
+        } catch {
+            return null;
+        }
+    }
+
     async generateResponse(phoneNumber, userMessage, customerName) {
         const startTime = Date.now();
+
+        // AbortController — cancels in-flight Groq HTTP requests when our budget runs out.
+        // Prevents timed-out calls from running 100+ seconds in the background (consuming
+        // Groq TPM quota and causing rate-limit cascades on the next request).
+        // Budget = 18s (2s below the outer 20s step timeout).
+        const abortController = new AbortController();
+        const abortTimer = setTimeout(() => {
+            logger.warn('⏱️ generateResponse: 18s budget exhausted — aborting Groq request');
+            abortController.abort();
+        }, 18000);
 
         try {
             // ── 0. Fast Intent Classifier (<1ms) ────────────────────
@@ -161,6 +254,7 @@ class GeminiService {
 
                 const responseTime = Date.now() - startTime;
                 logger.info(`⚡ Canned response (${classification.intent}) in ${responseTime}ms`);
+                clearTimeout(abortTimer);
                 return {
                     response: classification.cannedResponse,
                     responseTime,
@@ -172,7 +266,10 @@ class GeminiService {
             }
 
             // ── Full LLM path ───────────────────────────────────────
-            if (!this.client) return this._fallbackResponse(userMessage, startTime);
+            if (!this.client) {
+                clearTimeout(abortTimer);
+                return this._fallbackResponse(userMessage, startTime);
+            }
 
             this._evictOldestIfFull();
             this.conversationHistory.set(phoneNumber, history);
@@ -182,20 +279,20 @@ class GeminiService {
             while (history.length > this.maxHistory) history.shift();
 
             // ── Use RAG result from parallel fetch ──────────────────
+            const MAX_RAG_CHARS = 400; // Cap tokens — free tier is tight (6k TPM)
             let ragContext = '';
             if (ragResult.status === 'fulfilled' && ragResult.value) {
-                ragContext = ragResult.value;
+                ragContext = ragResult.value.substring(0, MAX_RAG_CHARS);
                 logger.info(`📚 RAG: injected ${ragContext.length} chars of context`);
             } else if (ragResult.status === 'rejected') {
                 logger.warn(`⚠️ RAG failed (continuing without): ${ragResult.reason?.message}`);
             }
-            // If RAG had no prevEntities context (ran in parallel before state loaded),
-            // re-run only if prevEntities actually has data and RAG returned nothing.
+            // Re-run RAG with prevEntities only if initial parallel fetch missed them
             if (!ragContext && Object.keys(prevEntities).length > 0) {
                 try {
                     const retry = await retrieveContext(classification.intent, classification.entities, prevEntities);
                     if (retry) {
-                        ragContext = retry;
+                        ragContext = retry.substring(0, MAX_RAG_CHARS);
                         logger.info(`📚 RAG retry with prevEntities: ${ragContext.length} chars`);
                     }
                 } catch (e) {
@@ -227,19 +324,21 @@ class GeminiService {
                 ...history
             ];
 
-            // ── First call ──────────────────────────────────────────
-            let response = await this.client.chat.completions.create({
+            const llmParams = {
                 model: this.model,
-                messages,
                 tools: TOOL_DEFINITIONS,
                 tool_choice: 'auto',
-                max_tokens: 800,   // Reduced: 8b is concise
-                temperature: 0.2,  // Lower = faster, more deterministic
-            });
+                max_tokens: 600,  // Reduced from 800 — saves TPM quota
+                temperature: 0.2,
+            };
+
+            // ── First LLM call ──────────────────────────────────────
+            let response = await this._callGroq({ ...llmParams, messages }, abortController.signal);
 
             let assistantMessage = response.choices[0].message;
             let toolCallCount = 0;
             const toolsUsed = [];
+            let lastToolResults = []; // kept for graceful degradation if LLM2 fails
 
             // ── Tool-call loop (parallel execution per round) ───────
             while (
@@ -247,7 +346,7 @@ class GeminiService {
                 toolCallCount < this.maxToolCalls
             ) {
                 toolCallCount++;
-                messages.push(assistantMessage); // record assistant turn
+                messages.push(assistantMessage);
 
                 // ⚡ Execute ALL tool calls in this round in PARALLEL
                 const toolResults = await Promise.all(
@@ -265,25 +364,38 @@ class GeminiService {
                         return {
                             role: 'tool',
                             tool_call_id: toolCall.id,
+                            name: toolName,  // extra field — used by formatToolFallback
                             content: JSON.stringify(result),
                         };
                     })
                 );
-
-                // Add all tool results to messages
+                lastToolResults = toolResults;
                 messages.push(...toolResults);
 
-                // Get next AI response
-                response = await this.client.chat.completions.create({
-                    model: this.model,
-                    messages,
-                    tools: TOOL_DEFINITIONS,
-                    tool_choice: 'auto',
-                    max_tokens: 800,
-                    temperature: 0.2,
-                });
-
-                assistantMessage = response.choices[0].message;
+                // ── LLM2: Generate response after tool execution ─────
+                // If this call times out/fails, use _formatToolFallback to build
+                // an Arabic response from the tool result so the user isn't left
+                // with a generic error even though their action succeeded.
+                let llm2Failed = false;
+                try {
+                    response = await this._callGroq({ ...llmParams, messages }, abortController.signal);
+                    assistantMessage = response.choices[0].message;
+                } catch (llm2Err) {
+                    logger.warn(`⚠️ LLM2 failed (${llm2Err?.message}) — using tool result template`);
+                    llm2Failed = true;
+                    // Build template from last tool result
+                    for (const tr of toolResults) {
+                        const template = this._formatToolFallback(tr.name, tr.content);
+                        if (template) {
+                            assistantMessage = { content: template, tool_calls: null };
+                            break;
+                        }
+                    }
+                    if (!assistantMessage?.content) {
+                        assistantMessage = { content: 'تم تنفيذ طلبك ✅\nللمزيد: 06-5000001', tool_calls: null };
+                    }
+                    break; // exit tool loop — we have a response
+                }
             }
 
             const aiText = assistantMessage.content || 'عذراً، صار مشكلة. جرب مرة ثانية.';
@@ -327,6 +439,7 @@ class GeminiService {
             const responseTime = Date.now() - startTime;
             logger.info(`✅ AI: ${responseTime}ms | أدوات: ${toolCallCount} [${toolsUsed.join(', ')}] | turn=${newTurnCount}`);
 
+            clearTimeout(abortTimer);
             return {
                 response: aiText,
                 responseTime,
@@ -337,6 +450,7 @@ class GeminiService {
             };
 
         } catch (error) {
+            clearTimeout(abortTimer);
             logger.error('❌ AI Error:', error.message);
             return this._fallbackResponse(userMessage, startTime);
         }

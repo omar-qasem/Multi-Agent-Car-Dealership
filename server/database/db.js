@@ -129,6 +129,15 @@ function seedMemory() {
 }
 
 // =============================================
+// Conversation States Availability Flag
+// =============================================
+// Set to true once initDatabase() confirms the table exists.
+// When false, getConversationState returns null and saves are silently
+// skipped so the system works without multi-turn memory rather than
+// crashing on every request.
+let conversationStatesAvailable = false;
+
+// =============================================
 // Supabase Error Handling Helper
 // =============================================
 /**
@@ -186,11 +195,31 @@ async function initDatabase() {
       return;
     }
     console.log('[DB] ✅ Supabase schema ready — persistent mode active');
+
+    // Check conversation_states table (optional migration — graceful degradation if missing)
+    const { error: csErr } = await supabase.from('conversation_states').select('phone_number').limit(1);
+    if (csErr && (csErr.code === 'PGRST205' || csErr.code === '42P01')) {
+      console.error('');
+      console.error('╔═════════════════════════════════════════════════════════════════╗');
+      console.error('║  ⚠️  MIGRATION MISSING — conversation_states table not found    ║');
+      console.error('║  Multi-turn memory DISABLED until migration runs.               ║');
+      console.error('║                                                                 ║');
+      console.error('║  FIX: Run in Supabase SQL Editor:                               ║');
+      console.error('║    server/database/migrations/001_conversation_states.sql       ║');
+      console.error('╚═════════════════════════════════════════════════════════════════╝');
+      console.error('');
+      // DO NOT throw — system continues working, just without conversation memory
+    } else if (!csErr) {
+      conversationStatesAvailable = true;
+      console.log('[DB] ✅ conversation_states table ready — multi-turn memory active');
+    }
+
     return;
   }
 
   // Env vars not set at all → dev mode with in-memory seed data.
   seedMemory();
+  conversationStatesAvailable = true; // in-memory always supports it
   console.log(`[DB] 🚗 In-memory dev mode: ${mem.cars.length} cars | 🔧 ${mem.parts.length} parts | 🎯 ${mem.promotions.length} promotions`);
   console.log('[DB] ⚠️  Set SUPABASE_URL and SUPABASE_SERVICE_KEY for production persistence.');
 }
@@ -1039,6 +1068,8 @@ const memConvStates = new Map();
  */
 async function getConversationState(phoneNumber) {
   if (!phoneNumber) return null;
+  // If table doesn't exist yet (migration not run), return null gracefully
+  if (!conversationStatesAvailable) return null;
 
   if (useSupabase) {
     const { data, error } = await supabase
@@ -1060,6 +1091,7 @@ async function getConversationState(phoneNumber) {
  */
 async function saveConversationState(phoneNumber, state) {
   if (!phoneNumber) return;
+  if (!conversationStatesAvailable) return; // silently skip if table missing
 
   const payload = {
     phone_number:       phoneNumber,
@@ -1090,6 +1122,7 @@ async function saveConversationState(phoneNumber, state) {
  */
 async function clearConversationState(phoneNumber) {
   if (!phoneNumber) return;
+  if (!conversationStatesAvailable) return;
 
   if (useSupabase) {
     const { error } = await supabase
