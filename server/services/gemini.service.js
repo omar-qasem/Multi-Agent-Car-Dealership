@@ -112,37 +112,38 @@ class GeminiService {
 
         try {
             // ── 0. Fast Intent Classifier (<1ms) ────────────────────
-            // Handles greetings & FAQs with canned responses (skips LLM).
-            // For other intents, extracts entities and tags the intent so
-            // the LLM gets a head start.
             const classification = classify(userMessage);
             logger.info(`🏷️ Classifier: intent=${classification.intent} conf=${classification.confidence} entities=${JSON.stringify(classification.entities)}`);
 
-            // ── Load persisted conversation state from Supabase ─────
+            // ── 1. PARALLEL: Load conv state + RAG pre-fetch ────────
+            // These are independent DB calls — run together to save ~1-2s.
+            const [convStateResult, ragResult] = await Promise.allSettled([
+                db.getConversationState(phoneNumber),
+                // Only run RAG if we'll need LLM (skip for canned responses)
+                classification.cannedResponse
+                    ? Promise.resolve(null)
+                    : retrieveContext(classification.intent, classification.entities, {}),
+            ]);
+
             let history = [];
             let convState = null;
-            try {
-                convState = await db.getConversationState(phoneNumber);
-                if (convState?.history && Array.isArray(convState.history)) {
-                    history = convState.history.slice(); // copy
+            if (convStateResult.status === 'fulfilled' && convStateResult.value) {
+                convState = convStateResult.value;
+                if (convState.history && Array.isArray(convState.history)) {
+                    history = convState.history.slice();
                 }
-            } catch (e) {
-                logger.warn(`⚠️ getConversationState failed (using empty history): ${e.message}`);
+            } else if (convStateResult.status === 'rejected') {
+                logger.warn(`⚠️ getConversationState failed (using empty history): ${convStateResult.reason?.message}`);
             }
 
-            // ── Merge classifier entities into conversation state ────
-            // Accumulate entities across turns so "بدي احجز" on turn 1 +
-            // "تويوتا كامري" on turn 2 builds up the full picture.
+            // Merge classifier entities into conversation state
             const prevEntities = (convState?.collected_entities && typeof convState.collected_entities === 'object')
                 ? convState.collected_entities
                 : {};
             const mergedEntities = { ...prevEntities, ...classification.entities };
 
             // ── Canned response short-circuit ───────────────────────
-            // If the classifier returned a canned response (greeting / FAQ),
-            // skip the LLM entirely — saves ~1.5-3s per message.
             if (classification.cannedResponse) {
-                // Still save to conversation state + history so context is preserved
                 history.push({ role: 'user', content: userMessage });
                 history.push({ role: 'assistant', content: classification.cannedResponse });
                 while (history.length > this.maxHistory) history.shift();
@@ -173,33 +174,33 @@ class GeminiService {
             // ── Full LLM path ───────────────────────────────────────
             if (!this.client) return this._fallbackResponse(userMessage, startTime);
 
-            // Mirror to in-memory Map for hot-path reads in same instance
             this._evictOldestIfFull();
             this.conversationHistory.set(phoneNumber, history);
             this.conversationLastAccess.set(phoneNumber, Date.now());
 
-            // Add user message
             history.push({ role: 'user', content: userMessage });
-            // Trim to maxHistory
             while (history.length > this.maxHistory) history.shift();
 
-            // ── RAG: Pre-fetch relevant data from DB ────────────────
-            // Runs in parallel with nothing — it's fast (<1.5s timeout).
-            // The retrieved context is injected into the system prompt so the
-            // LLM can answer without a tool-call round-trip.
+            // ── Use RAG result from parallel fetch ──────────────────
             let ragContext = '';
-            try {
-                const retrieved = await retrieveContext(
-                    classification.intent,
-                    classification.entities,
-                    prevEntities
-                );
-                if (retrieved) {
-                    ragContext = retrieved;
-                    logger.info(`📚 RAG: injected ${ragContext.length} chars of context`);
+            if (ragResult.status === 'fulfilled' && ragResult.value) {
+                ragContext = ragResult.value;
+                logger.info(`📚 RAG: injected ${ragContext.length} chars of context`);
+            } else if (ragResult.status === 'rejected') {
+                logger.warn(`⚠️ RAG failed (continuing without): ${ragResult.reason?.message}`);
+            }
+            // If RAG had no prevEntities context (ran in parallel before state loaded),
+            // re-run only if prevEntities actually has data and RAG returned nothing.
+            if (!ragContext && Object.keys(prevEntities).length > 0) {
+                try {
+                    const retry = await retrieveContext(classification.intent, classification.entities, prevEntities);
+                    if (retry) {
+                        ragContext = retry;
+                        logger.info(`📚 RAG retry with prevEntities: ${ragContext.length} chars`);
+                    }
+                } catch (e) {
+                    logger.warn(`⚠️ RAG retry failed: ${e.message}`);
                 }
-            } catch (e) {
-                logger.warn(`⚠️ RAG failed (continuing without): ${e.message}`);
             }
 
             // ── Build messages ──────────────────────────────────────

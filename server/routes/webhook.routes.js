@@ -105,13 +105,14 @@ async function step(name, fn, { critical = false, timeoutMs = null } = {}) {
     }
 }
 
-// Hard timeouts (must leave headroom under Netlify's 10s function limit)
-// Netlify Functions have a 26s max (not 10s — that's API Gateway, not Netlify).
-// Meta retries at ~20s. We budget: 2s parse/read + 12s AI + 3s send + 3s save = 20s.
+// Hard timeouts — Netlify Functions have a 26s max.
+// Meta accepts up to ~20s before retry.
+// Budget: 2s parse/read + 20s AI + 2s send+save (parallel) = 24s < 26s.
+// The AI step includes: state load + classifier + RAG + LLM + tool loops.
 const TIMEOUTS = {
     markAsRead:  2000,
     customerOp: 3000,
-    aiCall:    12000,   // Groq 1–3s + RAG 1.5s + tool loops = need headroom
+    aiCall:    20000,   // Groq LLM ~3-8s + RAG 1s + state load + tool loops
     sendMsg:    3000,
     saveConv:   3000,
 };
