@@ -342,12 +342,17 @@ class GeminiService {
                 while (history.length > this.maxHistory) history.shift();
 
                 try {
-                    await db.saveConversationState(phoneNumber, {
-                        history,
-                        pending_intent:     convState?.pending_intent || null,
-                        collected_entities: mergedEntities,
-                        turn_count:         (convState?.turn_count || 0) + 1,
-                    });
+                    await Promise.race([
+                        db.saveConversationState(phoneNumber, {
+                            history,
+                            pending_intent:     convState?.pending_intent || null,
+                            collected_entities: mergedEntities,
+                            turn_count:         (convState?.turn_count || 0) + 1,
+                        }),
+                        new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('saveConversationState: 2s timeout')), 2000)
+                        ),
+                    ]);
                 } catch (e) {
                     logger.warn(`⚠️ saveConversationState (canned) failed: ${e.message}`);
                 }
@@ -424,9 +429,27 @@ class GeminiService {
                 ...history
             ];
 
+            // When primary model's TPD is exhausted and we're on the fallback model
+            // (llama-3.1-8b-instant), restrict to read-only tools only.
+            // Reason: llama-3.1-8b-instant ignores system prompt instructions about
+            // collecting required info first — it aggressively calls write tools
+            // (create_purchase_inquiry, book_maintenance) with no user data.
+            // Read-only tools are safe because they only look up data, never write.
+            const WRITE_TOOLS = new Set([
+                'book_maintenance', 'create_purchase_inquiry', 'submit_support_ticket',
+            ]);
+            const activeModel = this._primaryModelExhausted ? this.fallbackModel : this.model;
+            const activeTools = this._primaryModelExhausted
+                ? TOOL_DEFINITIONS.filter(t => !WRITE_TOOLS.has(t.function?.name))
+                : TOOL_DEFINITIONS;
+
+            if (this._primaryModelExhausted) {
+                logger.info(`⚠️ Fallback mode: write tools disabled (${WRITE_TOOLS.size} blocked)`);
+            }
+
             const llmParams = {
-                model: this.model,
-                tools: TOOL_DEFINITIONS,
+                model: activeModel,
+                tools: activeTools,
                 tool_choice: 'auto',
                 max_tokens: 450,  // Reduced — saves TPD quota (100k/day limit)
                 temperature: 0.2,
@@ -602,12 +625,19 @@ class GeminiService {
 
             const newTurnCount = (convState?.turn_count || 0) + 1;
             try {
-                await db.saveConversationState(phoneNumber, {
-                    history,
-                    pending_intent:     toolCompleted ? null : resolvedIntent,
-                    collected_entities: toolCompleted ? {} : mergedEntities,
-                    turn_count:         newTurnCount,
-                });
+                // Hard 2s timeout — if conversation_states table is missing or DB is slow,
+                // we must NOT let this hang for 10-12s and cause the Netlify step timeout.
+                await Promise.race([
+                    db.saveConversationState(phoneNumber, {
+                        history,
+                        pending_intent:     toolCompleted ? null : resolvedIntent,
+                        collected_entities: toolCompleted ? {} : mergedEntities,
+                        turn_count:         newTurnCount,
+                    }),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('saveConversationState: 2s timeout')), 2000)
+                    ),
+                ]);
             } catch (e) {
                 logger.warn(`⚠️ saveConversationState failed (continuing): ${e.message}`);
             }
