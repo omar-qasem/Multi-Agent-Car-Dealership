@@ -494,6 +494,24 @@ async function executeTool(toolName, args, customerPhone) {
           notes:           args.notes || '',
         }));
 
+        // P1-01: slot was just booked by another customer between
+        // check_branch_availability and book_maintenance. Tell the LLM to
+        // apologize and re-prompt with a different time. Do NOT pretend the
+        // booking succeeded.
+        if (booking?.slot_taken) {
+          const displayTimeTaken = canonicalToDisplay(canonicalTime);
+          return {
+            success: false,
+            write_persisted: false,
+            slot_taken: true,
+            conflict: booking.conflict,
+            message:
+              `معذرة، تم حجز الوقت ${displayTimeTaken} في فرع ${args.branch} يوم ${args.preferred_date} من عميل ثاني قبل لحظات. ` +
+              'استدعِ check_branch_availability مرة ثانية لنفس التاريخ واقترح على العميل وقت بديل من القائمة المحدّثة.',
+            suggestion: 'call_check_branch_availability_again',
+          };
+        }
+
         const displayTime = canonicalToDisplay(canonicalTime);
         return {
           success: true,

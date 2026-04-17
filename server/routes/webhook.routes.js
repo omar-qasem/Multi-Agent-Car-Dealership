@@ -50,16 +50,22 @@ const PHONE_REGEX = /^\+?[1-9]\d{7,14}$/;
 const isValidPhone = (phone) => typeof phone === 'string' && PHONE_REGEX.test(phone);
 
 // =============================================
-// Message ID Deduplication
+// Message ID Deduplication (two-tier: memory + DB)
 // =============================================
-// Meta retries the webhook if it doesn't receive 200 in ~5s.
-// In serverless this Map resets on cold start, which is fine — Meta retries
-// happen within seconds, well within a warm container's lifetime.
+// Meta retries the webhook if it doesn't receive 200 in ~5s. Retries
+// usually hit the same warm Lambda — so an in-memory Map catches 99% of
+// duplicates for free (no DB round-trip). But cold starts and parallel
+// invocations (one frozen, one retry) can both sneak past the Map. The
+// DB-backed check in `isDuplicateMessageDb` closes that gap, and the
+// partial unique index from migration 004 (idx_messages_message_id_unique)
+// is the final backstop — if two races both pass all checks, the losing
+// INSERT gets SQLSTATE 23505 and saveConversation quietly returns the
+// existing row.
 const SEEN_MESSAGE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_SEEN_MESSAGES   = 5000;
 const seenMessageIds = new Map(); // messageId → timestamp
 
-function isDuplicateMessage(messageId) {
+function isDuplicateMessageMem(messageId) {
     if (!messageId) return false;
 
     if (seenMessageIds.size > MAX_SEEN_MESSAGES) {
@@ -77,6 +83,26 @@ function isDuplicateMessage(messageId) {
     if (seenMessageIds.has(messageId)) return true;
     seenMessageIds.set(messageId, Date.now());
     return false;
+}
+
+/**
+ * DB-backed dedup — checks the messages table for prior processing of
+ * this message_id. Returns false on any lookup error (fail-open) because
+ * missing a duplicate once is far less bad than stalling the webhook on
+ * a transient Supabase blip.
+ *
+ * Exported as a helper so tests can stub it, and so we can swap it for a
+ * Redis/KV-backed implementation later without touching the main route.
+ */
+async function isDuplicateMessageDb(messageId) {
+    if (!messageId) return false;
+    try {
+        if (typeof db.hasMessageId !== 'function') return false;
+        return await db.hasMessageId(messageId);
+    } catch (e) {
+        console.warn('[WEBHOOK] isDuplicateMessageDb soft-fail:', e?.message);
+        return false;
+    }
 }
 
 // =============================================
@@ -177,9 +203,14 @@ router.post('/', verifyMetaSignature, async (req, res) => {
             logger.info(`🚫 رقم محظور: ${message.from}`);
             return respondOk('blacklisted');
         }
-        if (isDuplicateMessage(message.id)) {
-            logger.info(`🔁 Duplicate webhook ignored: ${message.id}`);
-            return respondOk('duplicate');
+        // Two-tier dedup: cheap in-memory first, then DB for cold-start/parallel cases.
+        if (isDuplicateMessageMem(message.id)) {
+            logger.info(`🔁 Duplicate webhook ignored (mem): ${message.id}`);
+            return respondOk('duplicate-mem');
+        }
+        if (await isDuplicateMessageDb(message.id)) {
+            logger.info(`🔁 Duplicate webhook ignored (db): ${message.id}`);
+            return respondOk('duplicate-db');
         }
 
         const text = (message.text?.body || '').trim();

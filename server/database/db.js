@@ -506,6 +506,16 @@ async function updateCustomerLoyalty(customerId, points) {
  * Accepts the exact shape sent by agent-tools.js:
  *   { customer_phone, customer_name, car_make, car_model, car_year,
  *     service_type, preferred_date, preferred_time, branch, notes }
+ *
+ * P1-01 contract: if the requested (branch, preferred_date, preferred_time)
+ * slot is already held by a non-cancelled booking, this function does NOT
+ * throw — it returns `{ slot_taken: true, conflict: {...} }`. Callers
+ * (agent-tools.js `book_maintenance`) branch on that flag to tell the
+ * customer the slot was just taken and re-prompt with fresh availability.
+ *
+ * Real-infrastructure failures (network down, RLS misconfigured, schema
+ * missing) still throw via sbThrow() so the agent's graceful-fail path
+ * fires instead of pretending the write succeeded.
  */
 async function createBooking(data) {
   const payload = {
@@ -534,9 +544,47 @@ async function createBooking(data) {
       }
     }
     const { data: row, error } = await supabase.from('bookings').insert([payload]).select().single();
-    if (error) sbThrow('createBooking', error);
+    if (error) {
+      // P1-01: 23505 = unique_violation on idx_bookings_slot_unique.
+      // Translate to a structured "slot taken" response rather than throwing,
+      // so agent-tools treats this as a user-visible conflict (not an outage).
+      if (error.code === '23505') {
+        console.warn(`[DB] ⚠️  Slot collision on ${payload.branch} ${payload.preferred_date} ${payload.preferred_time}`);
+        return {
+          slot_taken: true,
+          conflict: {
+            branch:         payload.branch,
+            preferred_date: payload.preferred_date,
+            preferred_time: payload.preferred_time,
+          },
+        };
+      }
+      sbThrow('createBooking', error);
+    }
     console.log(`[DB] ✅ Booking saved to Supabase: id=${row.id}`);
     return row;
+  }
+
+  // In-memory: enforce the same uniqueness contract so local tests and dev
+  // behave identically to production.
+  if (payload.branch && payload.preferred_date && payload.preferred_time) {
+    const collision = mem.bookings.some(b =>
+      b.branch === payload.branch &&
+      b.preferred_date === payload.preferred_date &&
+      b.preferred_time === payload.preferred_time &&
+      b.status !== 'cancelled'
+    );
+    if (collision) {
+      console.warn(`[DB] ⚠️  (in-memory) slot collision on ${payload.branch} ${payload.preferred_date} ${payload.preferred_time}`);
+      return {
+        slot_taken: true,
+        conflict: {
+          branch:         payload.branch,
+          preferred_date: payload.preferred_date,
+          preferred_time: payload.preferred_time,
+        },
+      };
+    }
   }
 
   const booking = {
@@ -799,8 +847,27 @@ async function saveConversation(data) {
 
   if (useSupabase) {
     const { data: row, error } = await supabase.from('messages').insert([payload]).select().single();
-    if (error) sbThrow('saveConversation', error);
+    if (error) {
+      // P1-02: duplicate message_id — another Lambda instance already saved
+      // this message. Treat as a benign no-op and return the existing row.
+      if (error.code === '23505' && payload.message_id) {
+        console.warn(`[DB] ⚠️  Duplicate message_id on save: ${payload.message_id} — returning existing row`);
+        const { data: existing, error: readErr } = await supabase
+          .from('messages').select('*').eq('message_id', payload.message_id).maybeSingle();
+        if (readErr) sbThrow('saveConversation.lookupExisting', readErr);
+        return existing || null;
+      }
+      sbThrow('saveConversation', error);
+    }
     return row;
+  }
+  // In-memory mirror of the 23505 behavior
+  if (payload.message_id) {
+    const existing = mem.messages.find(m => m.message_id === payload.message_id);
+    if (existing) {
+      console.warn(`[DB] ⚠️  (in-memory) duplicate message_id on save: ${payload.message_id}`);
+      return existing;
+    }
   }
   const msg = {
     id: mem.counters.messages++,
@@ -810,6 +877,36 @@ async function saveConversation(data) {
   mem.messages.push(msg);
   if (mem.messages.length > 5000) mem.messages.shift();
   return msg;
+}
+
+/**
+ * P1-02: Cheap pre-check for webhook deduplication across Lambda cold
+ * starts / concurrent invocations. Returns true if a messages row with
+ * this Meta message_id already exists.
+ *
+ * Failure mode: if the lookup itself fails (network hiccup, RLS hiccup)
+ * we DO NOT throw — we return false. False here means "not known to be
+ * a duplicate," and the uniqueness index on the insert is the backstop.
+ * Better to occasionally double-process one message than to crash the
+ * webhook and have Meta retry the whole thing 5 more times.
+ */
+async function hasMessageId(messageId) {
+  if (!messageId) return false;
+  if (useSupabase) {
+    try {
+      const { data, error } = await supabase
+        .from('messages').select('id').eq('message_id', messageId).limit(1);
+      if (error) {
+        console.warn(`[DB] hasMessageId soft-fail (${error.code}): ${error.message}`);
+        return false;
+      }
+      return Array.isArray(data) && data.length > 0;
+    } catch (e) {
+      console.warn('[DB] hasMessageId threw — treating as not-duplicate:', e?.message);
+      return false;
+    }
+  }
+  return mem.messages.some(m => m.message_id === messageId);
 }
 
 async function getConversations(filters = {}) {
@@ -1203,6 +1300,7 @@ module.exports = {
   updateInquiry,
   // Conversations / Messages
   saveConversation,
+  hasMessageId,
   getConversations,
   getConversationsByPhone,
   getGroupedConversations,
