@@ -28,11 +28,22 @@ const geminiService = require('../services/gemini.service');
 const db = require('../database/db');
 const { analyzeSentiment, detectTopic, detectIntent } = require('../utils/sentiment');
 const { checkBlacklist } = require('../middleware/auth');
+const { verifyMetaSignature } = require('../middleware/webhookSignature');
 const logger = require('../utils/logger');
 
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 if (!VERIFY_TOKEN) {
     logger.error('❌ WHATSAPP_VERIFY_TOKEN not set — webhook verification will fail');
+}
+
+// P0-01: Meta App Secret must be configured in production so HMAC verification
+// can reject forged webhook POSTs. See middleware/webhookSignature.js.
+if (!process.env.WHATSAPP_APP_SECRET) {
+    if (process.env.NODE_ENV === 'production') {
+        logger.error('🚫 FATAL(config): WHATSAPP_APP_SECRET not set — webhook signature cannot be verified in production.');
+    } else {
+        logger.warn('⚠️  WHATSAPP_APP_SECRET not set — webhook signature verification is DISABLED (dev only).');
+    }
 }
 
 const PHONE_REGEX = /^\+?[1-9]\d{7,14}$/;
@@ -135,7 +146,7 @@ router.get('/', (req, res) => {
 // =============================================
 // POST /webhook — Incoming WhatsApp Messages (SYNCHRONOUS)
 // =============================================
-router.post('/', async (req, res) => {
+router.post('/', verifyMetaSignature, async (req, res) => {
     const requestStart = Date.now();
 
     // ── Helper: always respond 200 to Meta exactly once ──

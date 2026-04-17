@@ -12,12 +12,30 @@ const isProduction = nodeEnv === 'production';
 // Validate required secrets
 // ==========================================
 
-// JWT_SECRET — must be set and strong (warn loudly but don't crash)
+// JWT_SECRET — MUST be set and strong in production. Crash hard rather than
+// boot with a guessable default: a default secret means every JWT is forgeable.
 const jwtSecret = process.env.JWT_SECRET;
-if (!jwtSecret || jwtSecret.length < 32) {
-    const msg = '⚠️  WARNING: JWT_SECRET should be set in .env and be at least 32 characters long.\n' +
-                '   Generate one with: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"';
-    console.error(msg);
+if (isProduction) {
+    if (!jwtSecret) {
+        console.error('🚫 FATAL: JWT_SECRET is not set in production. Refusing to start.');
+        console.error('   Generate one with:');
+        console.error('   node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
+        throw new Error('Missing JWT_SECRET in production environment');
+    }
+    if (jwtSecret.length < 32) {
+        console.error(`🚫 FATAL: JWT_SECRET is too short (${jwtSecret.length} chars). Must be at least 32.`);
+        throw new Error('JWT_SECRET too short in production environment');
+    }
+    // Reject obvious placeholder values
+    const forbidden = ['change', 'secret', 'default', 'insecure', 'please', 'your_', 'example'];
+    const lower = jwtSecret.toLowerCase();
+    if (forbidden.some(w => lower.includes(w))) {
+        console.error('🚫 FATAL: JWT_SECRET looks like a placeholder value. Set a real random secret.');
+        throw new Error('JWT_SECRET looks like a placeholder in production environment');
+    }
+} else if (!jwtSecret || jwtSecret.length < 32) {
+    console.warn('⚠️  WARNING: JWT_SECRET should be at least 32 characters. Using dev-only fallback.');
+    console.warn('   Generate one with: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
 }
 
 // WHATSAPP_VERIFY_TOKEN — should be set explicitly
@@ -47,6 +65,8 @@ module.exports = {
         nodeEnv: nodeEnv,
         jwtSecret: jwtSecret || 'dev_only_insecure_secret_please_change_in_env_file_32chars',
         jwtExpiresIn: '7d',
+        cookieSecure: isProduction, // cookie Secure flag
+        csrfSecret: process.env.CSRF_SECRET || (jwtSecret ? `csrf_${jwtSecret.slice(0, 16)}` : 'dev_csrf_secret_change_me'),
         corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
     },
 

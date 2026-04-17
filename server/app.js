@@ -7,11 +7,19 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const cookieParser = require('cookie-parser');
 const path = require('path');
 
 const config = require('./config/env');
 const logger = require('./utils/logger');
-const { apiRateLimit, webhookRateLimit, login, loginRateLimit } = require('./middleware/auth');
+const {
+    apiRateLimit,
+    webhookRateLimit,
+    login,
+    logout,
+    loginRateLimit,
+    requireCsrf,
+} = require('./middleware/auth');
 const db = require('./database/db');
 const { initDatabase, getDbMode } = db;
 
@@ -66,12 +74,23 @@ app.use(cors({
         return cb(new Error('CORS policy violation'));
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
     credentials: true,
 }));
 
-app.use(express.json({ limit: '10mb' }));
+// Capture the raw request body so the webhook can verify Meta's HMAC signature.
+// `verify` runs BEFORE JSON.parse, so req.rawBody holds the exact bytes Meta signed.
+app.use(express.json({
+    limit: '10mb',
+    verify: (req, _res, buf) => {
+        // Only keep raw bytes for webhook requests — other routes don't need them.
+        if (req.originalUrl && req.originalUrl.startsWith('/webhook')) {
+            req.rawBody = buf;
+        }
+    },
+}));
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 if (config.server.nodeEnv !== 'test') {
     app.use(morgan('dev'));
@@ -140,11 +159,12 @@ app.use('/webhook', webhookRateLimit, webhookRoutes);
 
 // Auth
 app.post('/api/auth/login', loginRateLimit, login);
+app.post('/api/auth/logout', logout);
 
-// API
-app.use('/api/conversations', apiRateLimit, conversationsRoutes);
-app.use('/api/analytics', apiRateLimit, analyticsRoutes);
-app.use('/api/manage', apiRateLimit, managementRoutes);
+// API — all state-changing API routes require CSRF token when called via cookie
+app.use('/api/conversations', apiRateLimit, requireCsrf, conversationsRoutes);
+app.use('/api/analytics',     apiRateLimit, requireCsrf, analyticsRoutes);
+app.use('/api/manage',        apiRateLimit, requireCsrf, managementRoutes);
 
 // Serve Frontend
 if (config.server.nodeEnv === 'production' && !process.env.NETLIFY) {

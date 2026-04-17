@@ -78,8 +78,10 @@ class GeminiService {
         this.model         = process.env.GROQ_MODEL          || 'llama-3.3-70b-versatile';
         this.fallbackModel = process.env.GROQ_FALLBACK_MODEL || 'llama-3.1-8b-instant';
         // Track whether primary model's daily quota is exhausted this serverless instance.
-        // Resets automatically when Groq resets (midnight UTC) and when the Lambda cold-starts.
+        // Groq TPD resets at UTC midnight. We also record the UTC date we hit it so a
+        // long-running process gives the primary model another chance the next day.
         this._primaryModelExhausted = false;
+        this._exhaustedUtcDate = null; // 'YYYY-MM-DD' of when we hit TPD
         this.maxHistory = 8;     // Last 4 turns — smaller = fewer tokens = faster
         this.maxToolCalls = 3;   // Hard cap on tool round-trips
         this.MAX_CUSTOMERS = parseInt(process.env.MAX_CONVERSATION_CUSTOMERS) || 10000;
@@ -130,6 +132,27 @@ class GeminiService {
         }
     }
 
+    /** UTC date helper used by the TPD-reset logic. */
+    _currentUtcDate() {
+        return new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
+    }
+
+    /**
+     * If the UTC day has rolled over since we hit TPD, clear the exhausted flag
+     * so the next call gets routed back to the primary model. Groq's TPD window
+     * is a rolling UTC day, so this is a safe heuristic — worst case we get one
+     * extra 429 and we set the flag again.
+     */
+    _maybeResetTpdFlag() {
+        if (!this._primaryModelExhausted) return;
+        const today = this._currentUtcDate();
+        if (this._exhaustedUtcDate && this._exhaustedUtcDate !== today) {
+            logger.info(`🔄 UTC day rolled over — resetting TPD flag, re-trying primary model (${this.model})`);
+            this._primaryModelExhausted = false;
+            this._exhaustedUtcDate = null;
+        }
+    }
+
     /**
      * Low-level Groq API call with:
      * - AbortSignal support (pass the generateResponse-level controller)
@@ -143,6 +166,9 @@ class GeminiService {
      *   minutes/hours → we switch models instead of waiting.
      */
     async _callGroq(params, signal) {
+        // Give the primary model another chance once the UTC day has rolled over.
+        this._maybeResetTpdFlag();
+
         // If primary model's daily quota was already exhausted this instance,
         // skip straight to fallback without a wasted round-trip.
         const effectiveParams = (this._primaryModelExhausted && params.model === this.model)
@@ -164,9 +190,10 @@ class GeminiService {
 
                     if (isTPD) {
                         // Daily quota exhausted — waiting is futile (42+ min).
-                        // Switch to fallback model for the rest of this instance's life.
+                        // Switch to fallback model for the rest of the UTC day.
                         this._primaryModelExhausted = true;
-                        logger.warn(`⚠️ Groq TPD exhausted for ${effectiveParams.model} — switching to fallback: ${this.fallbackModel}`);
+                        this._exhaustedUtcDate = this._currentUtcDate();
+                        logger.warn(`⚠️ Groq TPD exhausted for ${effectiveParams.model} — switching to fallback: ${this.fallbackModel} until UTC ${this._exhaustedUtcDate} rolls over`);
                         effectiveParams.model = this.fallbackModel;
                         // Retry immediately with new model (no sleep needed)
                         continue;
@@ -420,31 +447,36 @@ class GeminiService {
                 classifierHint += `\n- استخدم هذه الكيانات مباشرة عند استدعاء الأدوات — لا تسأل المستخدم عنها مرة ثانية.`;
             }
 
+            // P0-04: Keep write tools enabled on the fallback model. Previously we
+            // stripped `book_maintenance`/`submit_support_ticket`/`create_purchase_inquiry`
+            // when the primary model's TPD was exhausted, because the weaker model
+            // was prone to calling them with missing args. That silently broke the
+            // whole booking flow whenever we hit TPD — the customer would say
+            // "احجز لي موعد" and the model would have no booking tool to call.
+            //
+            // Now the tool boundary itself (P0-02) rejects under-specified calls
+            // with `{needs_more_info: true, missing_fields: [...]}`, which the LLM
+            // handles correctly on both models. We keep the full tool set and
+            // add a stronger reminder to the system prompt on fallback instead.
+            const onFallback = this._primaryModelExhausted;
+            const activeModel = onFallback ? this.fallbackModel : this.model;
+            const activeTools = TOOL_DEFINITIONS;
+
+            const fallbackReminder = onFallback
+                ? `\n\n⚠️ تنبيه مهم: قبل استدعاء book_maintenance أو create_purchase_inquiry أو submit_support_ticket، تأكد أنك جمعت كل الحقول المطلوبة من العميل (ماركة، موديل، خدمة، تاريخ، وقت، فرع). إذا ناقص حقل — اسأل العميل عنه أولاً، ولا تخترع قيم ولا تفترض.`
+                : '';
+
             const systemNote = customerName
-                ? `${SYSTEM_PROMPT}${ragContext}${classifierHint}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
-                : `${SYSTEM_PROMPT}${ragContext}${classifierHint}\nرقم العميل: ${phoneNumber}`;
+                ? `${SYSTEM_PROMPT}${ragContext}${classifierHint}${fallbackReminder}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
+                : `${SYSTEM_PROMPT}${ragContext}${classifierHint}${fallbackReminder}\nرقم العميل: ${phoneNumber}`;
 
             const messages = [
                 { role: 'system', content: systemNote },
                 ...history
             ];
 
-            // When primary model's TPD is exhausted and we're on the fallback model
-            // (llama-3.1-8b-instant), restrict to read-only tools only.
-            // Reason: llama-3.1-8b-instant ignores system prompt instructions about
-            // collecting required info first — it aggressively calls write tools
-            // (create_purchase_inquiry, book_maintenance) with no user data.
-            // Read-only tools are safe because they only look up data, never write.
-            const WRITE_TOOLS = new Set([
-                'book_maintenance', 'create_purchase_inquiry', 'submit_support_ticket',
-            ]);
-            const activeModel = this._primaryModelExhausted ? this.fallbackModel : this.model;
-            const activeTools = this._primaryModelExhausted
-                ? TOOL_DEFINITIONS.filter(t => !WRITE_TOOLS.has(t.function?.name))
-                : TOOL_DEFINITIONS;
-
-            if (this._primaryModelExhausted) {
-                logger.info(`⚠️ Fallback mode: write tools disabled (${WRITE_TOOLS.size} blocked)`);
+            if (onFallback) {
+                logger.warn(`⚠️ Running on fallback model (${this.fallbackModel}) — primary TPD exhausted. Write tools REMAIN ENABLED.`);
             }
 
             const llmParams = {

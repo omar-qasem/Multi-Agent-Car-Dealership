@@ -4,6 +4,71 @@
  */
 
 const db = require('../database/db');
+const {
+  CANONICAL_SLOTS,
+  DISPLAY_SLOTS,
+  canonicalToDisplay,
+  parseTime,
+  isValidSlot,
+} = require('../utils/timeSlots');
+
+// =============================================
+// P0-03: Write-tool classification + graceful-fail
+// =============================================
+// Tools that WRITE to the database. When these fail we MUST NOT pretend the
+// write succeeded — the LLM needs explicit signals that the record is not
+// persisted so it tells the customer the truth and offers a recovery path.
+const WRITE_TOOLS = new Set([
+  'book_maintenance',
+  'submit_support_ticket',
+  'create_purchase_inquiry',
+]);
+
+/**
+ * Classify an error thrown while executing a tool.
+ *  - 'transient'  : likely network / timeout — retry might work
+ *  - 'database'   : Supabase-layer failure that was surfaced by sbThrow()
+ *  - 'validation' : our own validation (shouldn't usually throw, but handle it)
+ *  - 'unknown'    : everything else
+ */
+function classifyError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  const code = err?.code || '';
+  if (
+    msg.includes('fetch failed') ||
+    msg.includes('network') ||
+    msg.includes('timeout') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('enotfound') ||
+    msg.includes('socket hang up') ||
+    code === '57014' || code === '08006' || code === '08003'
+  ) return 'transient';
+  if (msg.includes('[db] supabase') || msg.includes('supabase')) return 'database';
+  return 'unknown';
+}
+
+/**
+ * Retry a write operation a couple of times on transient errors.
+ * Keeps the total latency bounded (100ms + 250ms ≈ 350ms at most) so we
+ * don't blow the 20s Meta webhook budget.
+ */
+async function withWriteRetry(label, fn) {
+  const attempts = [0, 100, 250]; // delays in ms before each attempt
+  let lastErr;
+  for (let i = 0; i < attempts.length; i++) {
+    if (attempts[i] > 0) await new Promise(r => setTimeout(r, attempts[i]));
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const kind = classifyError(err);
+      if (kind !== 'transient') throw err; // only retry transient
+      console.warn(`[TOOL RETRY] ${label} attempt ${i + 1} failed: ${err?.message || err}`);
+    }
+  }
+  throw lastErr;
+}
 
 // =============================================
 // Tool Definitions (for Groq Function Calling)
@@ -73,7 +138,7 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'book_maintenance',
-      description: 'حجز موعد صيانة لعميل. استدعها فقط بعد جمع جميع الحقول المطلوبة: نوع الخدمة، ماركة السيارة، موديل السيارة، التاريخ (YYYY-MM-DD)، والفرع. يجب استدعاء check_branch_availability قبلها.',
+      description: 'حجز موعد صيانة لعميل. استدعها فقط بعد جمع جميع الحقول المطلوبة: نوع الخدمة، ماركة السيارة، موديل السيارة، التاريخ (YYYY-MM-DD)، الوقت (مثل "9:00 ص")، والفرع. يجب استدعاء check_branch_availability قبلها لجلب الأوقات المتاحة. لا تخترع وقتاً — اطلبه من العميل إذا ما ذكره.',
       parameters: {
         type: 'object',
         properties: {
@@ -86,11 +151,15 @@ const TOOL_DEFINITIONS = [
             description: 'نوع الخدمة (مطلوب): تغيير زيت، صيانة دورية، فحص شامل، إطارات، بريك، كهربائي، تبريد، أو أخرى',
           },
           preferred_date: { type: 'string', description: 'التاريخ بصيغة YYYY-MM-DD (مطلوب). حوّل ما يقوله العميل إلى هذه الصيغة.' },
-          preferred_time: { type: 'string', description: 'الوقت المفضل من available_time_slots الذي رجعته check_branch_availability' },
+          preferred_time: {
+            type: 'string',
+            description: 'الوقت المفضل (مطلوب). اختر قيمة من available_time_slots اللي رجعتها check_branch_availability. القيم المقبولة مثل: "8:00 ص"، "9:00 ص"، ... "12:00 م"، "1:00 م"، ... "7:00 م". لا تخترع وقتاً أبداً.',
+            enum: [...DISPLAY_SLOTS, ...CANONICAL_SLOTS],
+          },
           branch:         BRANCH_ENUM,
           notes:          { type: 'string', description: 'ملاحظات إضافية من العميل' },
         },
-        required: ['service_type', 'car_make', 'car_model', 'preferred_date', 'branch'],
+        required: ['service_type', 'car_make', 'car_model', 'preferred_date', 'preferred_time', 'branch'],
       },
     },
   },
@@ -298,15 +367,24 @@ async function executeTool(toolName, args, customerPhone) {
         }
 
         const MAX_DAILY_BOOKINGS = 12;
-        const TIME_SLOTS = ['8:00 ص', '9:00 ص', '10:00 ص', '11:00 ص', '12:00 م', '1:00 م', '2:00 م', '3:00 م', '4:00 م', '5:00 م', '6:00 م', '7:00 م'];
-
+        // P0-02: TIME_SLOTS is now driven by the canonical slot definition so
+        // comparisons with stored bookings are format-agnostic. We present
+        // Arabic display forms to the LLM/customer but compare canonically.
         const existingBookings = await db.getBookingsByBranchAndDate(branch, date);
         const bookedCount = existingBookings.length;
         const isFull = bookedCount >= MAX_DAILY_BOOKINGS;
 
-        // Build rough list of taken time slots from bookings
-        const takenSlots = new Set(existingBookings.map(b => b.preferred_time).filter(Boolean));
-        const availableSlots = TIME_SLOTS.filter(s => !takenSlots.has(s));
+        // Normalise every stored booking's time to canonical so legacy rows
+        // written in mixed formats ('9:00 ص', '9:00 صباحاً', '09:00') all match.
+        const takenCanonical = new Set(
+          existingBookings
+            .map(b => parseTime(b.preferred_time))
+            .filter(Boolean)
+        );
+        const availableCanonical = CANONICAL_SLOTS.filter(s => !takenCanonical.has(s));
+        // Show Arabic to the LLM/customer — but advertise both forms so the LLM
+        // can echo back either one and our parser will accept it.
+        const availableSlots = availableCanonical.map(canonicalToDisplay);
 
         if (isFull) {
           // Suggest next 3 working days as alternatives
@@ -338,17 +416,26 @@ async function executeTool(toolName, args, customerPhone) {
           date,
           booking_count: bookedCount,
           available_slots_count: MAX_DAILY_BOOKINGS - bookedCount,
-          available_time_slots: availableSlots,
+          available_time_slots: availableSlots,           // Arabic display form for the LLM/customer
+          available_slots_canonical: availableCanonical,  // 24-hour form — useful for re-prompting
           message: `فرع ${branch} متوفر بتاريخ ${date}. ${MAX_DAILY_BOOKINGS - bookedCount} مواعيد متاحة.`,
         };
       }
 
       case 'book_maintenance': {
-        // Hard-validate all required fields — the LLM should have collected them via conversation
+        // Hard-validate all required fields — the LLM should have collected them via conversation.
+        // P0-02: preferred_time is now required + must parse into a canonical slot.
         const missing = [];
-        if (!args.car_make  || args.car_make.trim()  === '') missing.push('ماركة السيارة (مثلاً: Toyota)');
-        if (!args.car_model || args.car_model.trim() === '') missing.push('موديل السيارة (مثلاً: Camry)');
-        if (!args.branch    || args.branch.trim()    === '') missing.push('الفرع (عمان، إربد، الزرقاء، العقبة)');
+        if (!args.car_make     || String(args.car_make).trim()     === '') missing.push('ماركة السيارة (مثلاً: Toyota)');
+        if (!args.car_model    || String(args.car_model).trim()    === '') missing.push('موديل السيارة (مثلاً: Camry)');
+        if (!args.service_type || String(args.service_type).trim()=== '') missing.push('نوع الخدمة (مثلاً: تغيير زيت)');
+        if (!args.preferred_date|| String(args.preferred_date).trim()===''|| !/^\d{4}-\d{2}-\d{2}$/.test(args.preferred_date)) {
+          missing.push('التاريخ بصيغة YYYY-MM-DD');
+        }
+        if (!args.preferred_time || String(args.preferred_time).trim() === '') {
+          missing.push('الوقت المفضل (مثلاً: 9:00 ص)');
+        }
+        if (!args.branch       || String(args.branch).trim()       === '') missing.push('الفرع (عمان، إربد، الزرقاء، العقبة)');
 
         if (missing.length > 0) {
           return {
@@ -367,15 +454,34 @@ async function executeTool(toolName, args, customerPhone) {
           };
         }
 
+        // Canonicalize time. Reject (don't default) anything we can't map to a
+        // real offered slot — that was the silent-bad-booking bug.
+        const canonicalTime = parseTime(args.preferred_time);
+        if (!canonicalTime || !isValidSlot(canonicalTime)) {
+          return {
+            success: false,
+            needs_more_info: true,
+            missing_fields: ['الوقت المفضل'],
+            message: `الوقت "${args.preferred_time}" غير مدرج في المواعيد المتاحة. اطلب من العميل يختار وقت من: ${DISPLAY_SLOTS.join('، ')}.`,
+            available_slots: DISPLAY_SLOTS,
+          };
+        }
+
         const customerName = args.customer_name || `عميل ${customerPhone.slice(-4)}`;
 
-        await db.upsertCustomer(customerPhone, {
-          name: customerName,
-          car_make: args.car_make,
-          car_model: args.car_model,
-        });
+        // upsertCustomer is best-effort — don't block the booking if the
+        // customer row fails to write (booking is still the important record).
+        try {
+          await withWriteRetry('upsertCustomer', () => db.upsertCustomer(customerPhone, {
+            name: customerName,
+            car_make: args.car_make,
+            car_model: args.car_model,
+          }));
+        } catch (e) {
+          console.warn('[TOOL] book_maintenance: upsertCustomer failed, continuing:', e?.message);
+        }
 
-        const booking = await db.createBooking({
+        const booking = await withWriteRetry('createBooking', () => db.createBooking({
           customer_phone:  customerPhone,
           customer_name:   customerName,
           car_make:        args.car_make,
@@ -383,11 +489,12 @@ async function executeTool(toolName, args, customerPhone) {
           car_year:        args.car_year || null,
           service_type:    args.service_type,
           preferred_date:  args.preferred_date,
-          preferred_time:  args.preferred_time || '9:00 صباحاً',
+          preferred_time:  canonicalTime, // canonical "HH:mm" is the source of truth
           branch:          args.branch,
           notes:           args.notes || '',
-        });
+        }));
 
+        const displayTime = canonicalToDisplay(canonicalTime);
         return {
           success: true,
           booking_id: booking.id,
@@ -396,7 +503,8 @@ async function executeTool(toolName, args, customerPhone) {
             booking_id: booking.id,
             service:    booking.service_type,
             date:       booking.preferred_date,
-            time:       booking.preferred_time,
+            time:       displayTime,       // Arabic for display
+            time_canonical: canonicalTime, // machine-readable
             branch:     booking.branch,
             car:        `${booking.car_make} ${booking.car_model}`,
           },
@@ -441,15 +549,19 @@ async function executeTool(toolName, args, customerPhone) {
 
       case 'submit_support_ticket': {
         const customerName = args.customer_name || `عميل ${customerPhone.slice(-4)}`;
-        await db.upsertCustomer(customerPhone, { name: customerName });
+        try {
+          await withWriteRetry('upsertCustomer', () => db.upsertCustomer(customerPhone, { name: customerName }));
+        } catch (e) {
+          console.warn('[TOOL] submit_support_ticket: upsertCustomer failed, continuing:', e?.message);
+        }
 
-        const ticket = await db.createTicket({
+        const ticket = await withWriteRetry('createTicket', () => db.createTicket({
           customer_phone:    customerPhone,
           customer_name:     customerName,
           issue_description: args.issue_description,
           category:          args.category || 'general',
           priority:          args.priority || 'medium',
-        });
+        }));
 
         return {
           success: true,
@@ -461,9 +573,13 @@ async function executeTool(toolName, args, customerPhone) {
 
       case 'create_purchase_inquiry': {
         const customerName = args.customer_name || `عميل ${customerPhone.slice(-4)}`;
-        await db.upsertCustomer(customerPhone, { name: customerName });
+        try {
+          await withWriteRetry('upsertCustomer', () => db.upsertCustomer(customerPhone, { name: customerName }));
+        } catch (e) {
+          console.warn('[TOOL] create_purchase_inquiry: upsertCustomer failed, continuing:', e?.message);
+        }
 
-        const inquiry = await db.createInquiry({
+        const inquiry = await withWriteRetry('createInquiry', () => db.createInquiry({
           customer_phone: customerPhone,
           customer_name:  customerName,
           car_make:       args.car_make  || '',
@@ -472,7 +588,7 @@ async function executeTool(toolName, args, customerPhone) {
           financing:      args.financing === true,
           trade_in:       args.trade_in  === true,
           notes:          args.notes     || '',
-        });
+        }));
 
         return {
           success: true,
@@ -672,9 +788,45 @@ async function executeTool(toolName, args, customerPhone) {
         return { success: false, error: `أداة غير معروفة: ${toolName}` };
     }
   } catch (error) {
-    console.error(`[TOOL ERROR] ${toolName}:`, error);
-    return { success: false, error: error.message };
+    const kind = classifyError(error);
+    const rawMsg = error?.message || String(error);
+    console.error(`[TOOL ERROR] ${toolName} (${kind}):`, rawMsg);
+
+    // ----------------------------------------------------------
+    // P0-03: Write tools must NEVER pretend success on infra error.
+    // Return a clearly-marked graceful-fail so the LLM tells the
+    // customer the truth ("we couldn't save it — call the branch
+    // or retry") instead of silently dropping the booking.
+    // ----------------------------------------------------------
+    if (WRITE_TOOLS.has(toolName)) {
+      const failureRef = `FAIL-${Date.now().toString(36).toUpperCase()}`;
+      return {
+        success: false,
+        write_persisted: false,        // explicit: nothing was saved
+        error_category: kind,          // 'transient' | 'database' | 'unknown'
+        retry_advised: kind === 'transient',
+        failure_ref: failureRef,       // for log correlation / customer support
+        customer_phone: customerPhone, // so the branch can call back
+        // Arabic message for the LLM to paraphrase to the customer.
+        // The key property is `write_persisted: false` — the LLM must not
+        // claim the booking/ticket/inquiry was saved.
+        message: kind === 'transient'
+          ? 'معذرة، صار في بطء مؤقت في السيستم وما قدرنا نحفظ طلبك هلأ. جرب مرة ثانية بعد شوي، أو اتصل بالفرع مباشرة ونسجله يدوياً. ما ضاع شي من معلوماتك.'
+          : 'معذرة، في مشكلة تقنية في حفظ الطلب هلأ. خذ رقم الفرع من get_branch_info واتصل فيهم وبيسجلولك الطلب يدوياً. آسفين على الإزعاج.',
+        // Internal-only diagnostic the LLM should NOT read to the customer.
+        // Present so admin dashboards can display the real cause.
+        _diagnostic: rawMsg,
+      };
+    }
+
+    // Read tools: short, generic failure is fine — the LLM will re-try or
+    // tell the customer it couldn't look something up.
+    return {
+      success: false,
+      error_category: kind,
+      error: rawMsg,
+    };
   }
 }
 
-module.exports = { TOOL_DEFINITIONS, executeTool };
+module.exports = { TOOL_DEFINITIONS, executeTool, WRITE_TOOLS, classifyError };
