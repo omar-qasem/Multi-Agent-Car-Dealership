@@ -73,10 +73,10 @@ class GeminiService {
         this.client = null;
         this.conversationHistory = new Map();
         this.conversationLastAccess = new Map();
-        // Primary model: reliable Arabic function calling, but only 100k TPD on free tier
-        // Fallback model: higher TPD limits (500k), less reliable function calling
-        this.model         = process.env.GROQ_MODEL          || 'llama-3.3-70b-versatile';
-        this.fallbackModel = process.env.GROQ_FALLBACK_MODEL || 'llama-3.1-8b-instant';
+        // Primary model: fast 8b-instant for <3s responses on Netlify
+        // Fallback model: 70b-versatile if 8b hits TPD or connection error
+        this.model         = process.env.GROQ_MODEL          || 'llama-3.1-8b-instant';
+        this.fallbackModel = process.env.GROQ_FALLBACK_MODEL || 'llama-3.3-70b-versatile';
         // Track whether primary model's daily quota is exhausted this serverless instance.
         // Groq TPD resets at UTC midnight. We also record the UTC date we hit it so a
         // long-running process gives the primary model another chance the next day.
