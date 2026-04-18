@@ -193,6 +193,36 @@ test('branch extraction: "وين فرعكم بعمان" → branch=عمان', ()
 });
 
 // =============================================================
+// 8. Production-observed spelling variants
+//    (Originated from Netlify log 2026-04-18: "بدي اشتري سيارة ...
+//    يعني حاطط ببالي تيوتا" — classifier missed car_make=Toyota,
+//    which fed into a 20s LLM timeout.)
+// =============================================================
+test('"تيوتا" (single و) maps to Toyota', () => {
+    assert.strictEqual(extractCarMake('حاطط ببالي تيوتا'), 'Toyota');
+});
+
+test('"طويوطا" (ط variant) maps to Toyota', () => {
+    assert.strictEqual(extractCarMake('بدي طويوطا كورولا'), 'Toyota');
+});
+
+test('"هيوندا" (missing ي) maps to Hyundai', () => {
+    assert.strictEqual(extractCarMake('بدي سيارة هيوندا النترا'), 'Hyundai');
+});
+
+test('"نسان" (missing ي) maps to Nissan', () => {
+    assert.strictEqual(extractCarMake('شو أسعار نسان سني'), 'Nissan');
+});
+
+test('full production message classifies as purchase with car_make=Toyota', () => {
+    const r = classify(
+        'بدي اشتري سيارة احكيلي الانواع والاسعار عندكم يعني حاطط ببالي تيوتا'
+    );
+    assert.strictEqual(r.intent, 'purchase');
+    assert.strictEqual(r.entities.car_make, 'Toyota');
+});
+
+// =============================================================
 // Runner
 // =============================================================
 (async () => {

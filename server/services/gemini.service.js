@@ -526,16 +526,21 @@ class GeminiService {
             const toolResultCache = new Map(); // key: "toolName:argsJSON" → resultJSON
 
             // ── Tool-call loop (parallel execution per round) ───────
+            // NOTE: `toolCallCount` is the ROUND counter — each `while`
+            // iteration is one LLM turn that can dispatch multiple tools
+            // in parallel. Per-tool identity is logged via the (idx,total)
+            // slot below so parallel calls don't all share "#1" in logs.
             while (
                 assistantMessage.tool_calls?.length > 0 &&
                 toolCallCount < this.maxToolCalls
             ) {
                 toolCallCount++;
                 messages.push(assistantMessage);
+                const roundToolTotal = assistantMessage.tool_calls.length;
 
                 // ⚡ Execute ALL tool calls in this round in PARALLEL
                 const toolResults = await Promise.all(
-                    assistantMessage.tool_calls.map(async (toolCall) => {
+                    assistantMessage.tool_calls.map(async (toolCall, toolIdx) => {
                         const toolName = toolCall.function.name;
                         let toolArgs = {};
                         try {
@@ -558,7 +563,10 @@ class GeminiService {
                             }
                         }
 
-                        logger.info(`🔧 Tool #${toolCallCount}: ${toolName}`);
+                        logger.info(
+                            `🔧 Round ${toolCallCount} tool ` +
+                            `${toolIdx + 1}/${roundToolTotal}: ${toolName}`
+                        );
                         toolsUsed.push(toolName);
                         const result = await executeTool(toolName, toolArgs, phoneNumber);
                         const resultStr = JSON.stringify(result);

@@ -29,14 +29,28 @@
 // =============================================
 // Canonical entity dictionaries
 // =============================================
+// Car makes keyed by every common Jordanian-Arabic spelling we've seen
+// in production WhatsApp logs. Canonical brand names use English.
+// NOTE: single-و "تيوتا" and ط-variants ("طويوطا") appear often — they
+// must all map to Toyota or the classifier leaks entities, which in
+// turn forces the LLM into broader (and slower) tool-calling.
 const CAR_MAKES = {
-    'تويوتا': 'Toyota',  'toyota': 'Toyota',
-    'هيونداي': 'Hyundai', 'hyundai': 'Hyundai',
-    'كيا': 'Kia',        'kia': 'Kia',
-    'نيسان': 'Nissan',   'nissan': 'Nissan',
-    'mg': 'MG',          'ام جي': 'MG', 'إم جي': 'MG',
-    'شيري': 'Chery',     'chery': 'Chery',
-    'بي ام': 'BMW',      'bmw': 'BMW', 'بي ام دبليو': 'BMW',
+    // Toyota — standard + common Jordanian misspellings
+    'تويوتا': 'Toyota', 'تيوتا': 'Toyota', 'طويوطا': 'Toyota',
+    'تويوطا': 'Toyota', 'طويوتا': 'Toyota', 'toyota': 'Toyota',
+    // Hyundai — multiple transliterations land in WhatsApp
+    'هيونداي': 'Hyundai', 'هيوندا': 'Hyundai', 'هيوندي': 'Hyundai',
+    'هيونداى': 'Hyundai', 'hyundai': 'Hyundai',
+    // Kia — short, but matchesKeyword() enforces boundary on ASCII
+    'كيا': 'Kia', 'kia': 'Kia',
+    // Nissan
+    'نيسان': 'Nissan', 'نسان': 'Nissan', 'nissan': 'Nissan',
+    // MG
+    'mg': 'MG', 'ام جي': 'MG', 'إم جي': 'MG',
+    // Chery
+    'شيري': 'Chery', 'جيري': 'Chery', 'chery': 'Chery',
+    // BMW
+    'بي ام': 'BMW', 'بي ام دبليو': 'BMW', 'bmw': 'BMW',
 };
 
 // Two lists: Arabic models (substring-safe because they're long) and
