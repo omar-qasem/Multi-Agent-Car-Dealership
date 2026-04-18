@@ -222,10 +222,28 @@ function normalize(text) {
 // =============================================
 // Entity extractors
 // =============================================
+// Matches a keyword inside `text` using a rule appropriate for its script:
+//   - Pure ASCII keywords (mg, kia, bmw, chery, toyota, etc.) require
+//     non-alphanumeric boundaries on both sides so "tokia" / "smg" / "cherry"
+//     don't produce false hits.
+//   - Arabic keywords use substring matching because they're long enough
+//     that false positives are rare, and Arabic word boundaries via \b
+//     are unreliable in JS regex.
+function matchesKeyword(text, keyword) {
+    if (!keyword) return false;
+    const isAscii = /^[A-Za-z0-9][A-Za-z0-9\s]*$/.test(keyword);
+    if (isAscii) {
+        const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?:[^A-Za-z0-9]|$)`, 'i');
+        return re.test(text);
+    }
+    return text.toLowerCase().includes(keyword.toLowerCase());
+}
+
 function extractCarMake(text) {
-    const lower = normalize(text).toLowerCase();
+    const norm = normalize(text);
     for (const [keyword, canonical] of Object.entries(CAR_MAKES)) {
-        if (lower.includes(keyword.toLowerCase())) return canonical;
+        if (matchesKeyword(norm, keyword)) return canonical;
     }
     return null;
 }
@@ -247,9 +265,27 @@ function extractCarModel(text) {
 }
 
 function extractServiceType(text) {
+    // Substring matching with an Arabic-aware right boundary: if the char
+    // immediately after the match is another Arabic letter, this is a
+    // DIFFERENT word (usually a verb conjugation), not the service noun.
+    // "فحصت السيارة" (I checked the car) must NOT fire "فحص شامل".
+    // "بدي فحص شامل" must fire because space follows "فحص".
+    // Prefix context ("ال", "بال") is intentionally not boundary-checked —
+    // "الصيانة" / "بالصيانة" should both match "صيانة".
     const lower = normalize(text).toLowerCase();
+    const ARABIC_LETTER = /[\u0600-\u06FF]/;
     for (const [keyword, canonical] of Object.entries(SERVICE_TYPES)) {
-        if (lower.includes(keyword.toLowerCase())) return canonical;
+        const k = keyword.toLowerCase();
+        const idx = lower.indexOf(k);
+        if (idx === -1) continue;
+        const after = lower[idx + k.length];
+        if (after && ARABIC_LETTER.test(after)) {
+            // Continues into another Arabic word — skip this keyword. Other
+            // SERVICE_TYPES entries may still legitimately match the same
+            // text (e.g. "تغيير زيت" keyword vs "زيت" alone).
+            continue;
+        }
+        return canonical;
     }
     return null;
 }
@@ -327,12 +363,30 @@ function hasStrongIntentKeyword(text) {
 }
 
 // Helper: returns true if a regex match is in a negated context.
-// We check the substring just BEFORE the matched verb.
+// We scan the preamble for a negation particle (ما / مش / مو / لا) that
+// sits within the same clause as the matched verb. Up to three filler
+// tokens are allowed between the negation and the verb so that
+// "والله ما كنت بدي احجز" (I truly didn't want to book) is caught, but
+// a distant negation in a prior clause is not.
+//
+// Clause boundary: the nearest sentence punctuation (،.!?؟) before the
+// match, or the start of the string. The negation must live inside that
+// slice. Connector "و" is NOT a clause boundary because it appears too
+// often inside a single thought ("والله").
 function isNegated(text, matchIndex) {
     if (matchIndex == null || matchIndex < 0) return false;
-    // Look at the 12 chars preceding the match — enough room for "ما " / "مش "
-    const before = text.slice(Math.max(0, matchIndex - 12), matchIndex);
-    return /(?:^|[\s،,.!?])(?:ما|مش|مو|لا)\s+$/.test(before);
+    const fullBefore = text.slice(0, matchIndex);
+    // Take the last clause only.
+    const punctIdx = Math.max(
+        fullBefore.lastIndexOf('،'),
+        fullBefore.lastIndexOf('.'),
+        fullBefore.lastIndexOf('!'),
+        fullBefore.lastIndexOf('?'),
+        fullBefore.lastIndexOf('؟'),
+    );
+    const clause = punctIdx >= 0 ? fullBefore.slice(punctIdx + 1) : fullBefore;
+    // Negation particle followed by 0..3 filler tokens, then run to end.
+    return /(?:^|[\s،,.!?؟])(?:ما|مش|مو|لا)(?:\s+\S+){0,3}\s+$/.test(clause);
 }
 
 // =============================================
@@ -361,13 +415,21 @@ function classify(text) {
     const fuel      = extractFuelType(norm);     if (fuel)      entities.fuel_type   = fuel;
     const condition = extractCondition(norm);    if (condition) entities.condition   = condition;
 
+    // Pre-compute compound-query guards so greeting/FAQ don't hijack a
+    // message that also carries a real question or intent.
+    const matchesAnyFaq = FAQ_PATTERNS.some(f => f.regex.test(norm));
+    const hasStrongIntent = hasStrongIntentKeyword(norm);
+
     // 1. Greetings — very high confidence canned response.
-    //    Guards: short message AND no strong intent keyword present.
-    //    Otherwise "هلا بدي احجز صيانة" would be hijacked by the greeting.
+    //    Guards: short message AND no strong intent keyword AND no FAQ
+    //    pattern AND no extracted service/date/budget present.
+    //    Otherwise "مرحبا شو رقم تلفونكم" or "هلا بدي احجز صيانة" would be
+    //    hijacked by the greeting menu.
     if (
         GREETING_PATTERNS.test(norm) &&
         norm.length < 25 &&
-        !hasStrongIntentKeyword(norm) &&
+        !hasStrongIntent &&
+        !matchesAnyFaq &&
         !service && !date && !budget
     ) {
         return {
@@ -385,15 +447,20 @@ function classify(text) {
         };
     }
 
-    // 2. FAQ — high confidence, skip the LLM
-    for (const faq of FAQ_PATTERNS) {
-        if (faq.regex.test(norm)) {
-            return {
-                intent: faq.intent,
-                confidence: 0.95,
-                cannedResponse: faq.response,
-                entities,
-            };
+    // 2. FAQ — high confidence canned response, BUT only when there's no
+    //    competing strong intent in the same message. "شو ساعات دوامكم
+    //    وبدي احجز صيانة" matches faq_hours and booking simultaneously —
+    //    we should let the LLM handle it so the booking isn't dropped.
+    if (!hasStrongIntent) {
+        for (const faq of FAQ_PATTERNS) {
+            if (faq.regex.test(norm)) {
+                return {
+                    intent: faq.intent,
+                    confidence: 0.95,
+                    cannedResponse: faq.response,
+                    entities,
+                };
+            }
         }
     }
 
