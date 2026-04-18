@@ -337,13 +337,16 @@ class GeminiService {
         const startTime = Date.now();
 
         // Global AbortController — hard ceiling for the entire pipeline.
-        // Budget = 16s (4s below the outer 20s step timeout, giving cleanup room).
-        // This catches stuck LLM1 calls and any runaway async work.
+        // Budget = 22s (2s below the outer 24s step timeout, giving cleanup
+        // room for state-save + fallback-template assembly). This catches
+        // stuck LLM1 calls and any runaway async work. Correctness is
+        // prioritized over latency — users accept slower but correct answers.
+        const GLOBAL_BUDGET_MS = 22000;
         const abortController = new AbortController();
         const abortTimer = setTimeout(() => {
-            logger.warn('⏱️ generateResponse: 16s global budget exhausted — aborting Groq request');
+            logger.warn(`⏱️ generateResponse: ${GLOBAL_BUDGET_MS}ms global budget exhausted — aborting Groq request`);
             abortController.abort();
-        }, 16000);
+        }, GLOBAL_BUDGET_MS);
 
         try {
             // ── 0. Fast Intent Classifier (<1ms) ────────────────────
@@ -594,10 +597,12 @@ class GeminiService {
                 // If it times out, _formatToolFallback builds an instant Arabic response
                 // from the tool result, so the user still gets a useful message.
                 //
-                // Budget calculation:
-                //   elapsed = time since generateResponse started
-                //   llm2Budget = min(7s, max(3s, 15s - elapsed))
-                //   This ensures LLM2 never hogs more than 7s AND always gets at least 3s.
+                // Budget calculation (correctness > latency):
+                //   elapsed     = time since generateResponse started
+                //   llm2Budget  = min(14s, max(5s, GLOBAL_BUDGET - 1s - elapsed))
+                //   Cap raised from 7s → 14s and floor from 3s → 5s so that complex
+                //   responses (multiple tool results, long Arabic generation) have
+                //   room to finish instead of falling back to the template.
                 //
                 // Tool pruning:
                 //   Remove all already-called cacheable tools from LLM2's tool list.
@@ -613,7 +618,10 @@ class GeminiService {
                 logger.info(`🛡️ LLM2 tools: ${TOOL_DEFINITIONS.length} → ${llm2Tools.length} (pruned ${calledCacheableTools.size} already-called)`);
 
                 const elapsed = Date.now() - startTime;
-                const llm2BudgetMs = Math.min(7000, Math.max(3000, 15000 - elapsed));
+                const llm2BudgetMs = Math.min(
+                    14000,
+                    Math.max(5000, GLOBAL_BUDGET_MS - 1000 - elapsed)
+                );
                 const llm2Abort = new AbortController();
                 const llm2Timer = setTimeout(() => {
                     logger.warn(`⏱️ LLM2: ${llm2BudgetMs}ms budget exhausted — using tool fallback`);

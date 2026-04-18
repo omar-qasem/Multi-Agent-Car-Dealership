@@ -185,13 +185,14 @@ async function step(name, fn, {
 }
 
 // Hard timeouts — Netlify Functions have a 26s max.
-// Meta accepts up to ~20s before retry.
-// Budget: 2s parse/read + 20s AI + 2s send+save (parallel) = 24s < 26s.
-// The AI step includes: state load + classifier + RAG + LLM + tool loops.
+// Meta accepts up to ~20s before retry, Netlify Pro sync functions cap at 26s.
+// Budget: 1s parse/read + 24s AI + 1s send+save tail = ~26s.
+// The AI step includes: state load + classifier + RAG + LLM1 + tool loops + LLM2.
+// Correctness > latency: we'd rather a slow correct answer than a fast fallback.
 const TIMEOUTS = {
     markAsRead:  2000,
     customerOp: 3000,
-    aiCall:    20000,   // Groq LLM ~3-8s + RAG 1s + state load + tool loops
+    aiCall:    24000,   // was 20s — widened so LLM2 and tool loops can finish
     sendMsg:    3000,
     saveConv:   3000,
 };
