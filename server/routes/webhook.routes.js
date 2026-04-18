@@ -22,6 +22,7 @@
  */
 
 const express = require('express');
+const crypto = require('node:crypto');
 const router = express.Router();
 const whatsappService = require('../services/whatsapp.service');
 const geminiService = require('../services/gemini.service');
@@ -30,6 +31,15 @@ const { analyzeSentiment, detectTopic, detectIntent } = require('../utils/sentim
 const { checkBlacklist } = require('../middleware/auth');
 const { verifyMetaSignature } = require('../middleware/webhookSignature');
 const logger = require('../utils/logger');
+const metrics = require('../utils/metrics');
+
+// P2-01: Correlation IDs. Every webhook gets a request_id; once we've
+// parsed the payload we upgrade the scoped logger with message_id + phone
+// so downstream steps (AI, send, save) all carry the same breadcrumb.
+function newRequestId() {
+    try { return crypto.randomUUID(); }
+    catch { return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`; }
+}
 
 const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
 if (!VERIFY_TOKEN) {
@@ -108,7 +118,20 @@ async function isDuplicateMessageDb(messageId) {
 // =============================================
 // Step Timer — wrap any async op with timing + structured error logging
 // =============================================
-async function step(name, fn, { critical = false, timeoutMs = null } = {}) {
+// P2-02: when a `trace` array is passed, each step appends
+//   { step, ms, ok, code?, err_kind? }
+// so the caller can emit a single aggregated trace line at end-of-request.
+// Per-step logs are still emitted for real-time tailing; the aggregate
+// makes post-hoc analysis (p95 latency per step, failure hotspots) trivial.
+//
+// `log` is an optional scoped logger (carrying request_id, message_id,
+// phone). Falls back to the root logger so legacy call sites work.
+async function step(name, fn, {
+    critical = false,
+    timeoutMs = null,
+    log = logger,
+    trace = null,
+} = {}) {
     const t0 = Date.now();
     try {
         const promise = Promise.resolve().then(fn);
@@ -129,14 +152,33 @@ async function step(name, fn, { critical = false, timeoutMs = null } = {}) {
             result = await promise;
         }
         const dt = Date.now() - t0;
-        console.log(`[STEP] ✅ ${name} ok (${dt}ms)`);
+        log.info(`step:${name} ok`, { step: name, status: 'ok', ms: dt });
+        if (trace) trace.push({ step: name, ms: dt, ok: true });
+        // P2-03 metrics
+        metrics.observe('step_duration_ms', dt, { step: name, outcome: 'ok' });
+        metrics.inc('step_total', 1, { step: name, outcome: 'ok' });
         return { ok: true, result, ms: dt };
     } catch (err) {
         const dt = Date.now() - t0;
-        const code = err?.code ? ` code=${err.code}` : '';
-        const details = err?.details ? ` details=${err.details}` : '';
-        console.error(`[STEP] ❌ ${name} FAILED (${dt}ms)${code}${details} — ${err?.message || err}`);
-        if (err?.stack) console.error(err.stack);
+        const errKind = err?.code
+            || (err?.message?.includes('timed out') ? 'TIMEOUT' : 'ERROR');
+        log.error(`step:${name} failed`, {
+            step: name,
+            status: 'failed',
+            ms: dt,
+            code: err?.code,
+            details: err?.details,
+            err,
+        });
+        if (trace) trace.push({
+            step: name, ms: dt, ok: false,
+            err_kind: errKind,
+            err_message: err?.message,
+        });
+        // P2-03 metrics
+        metrics.observe('step_duration_ms', dt, { step: name, outcome: 'failed' });
+        metrics.inc('step_total', 1, { step: name, outcome: 'failed' });
+        metrics.inc('step_errors_total', 1, { step: name, err_kind: errKind });
         if (critical) throw err;
         return { ok: false, error: err, ms: dt };
     }
@@ -174,6 +216,9 @@ router.get('/', (req, res) => {
 // =============================================
 router.post('/', verifyMetaSignature, async (req, res) => {
     const requestStart = Date.now();
+    const requestId = newRequestId();
+    // Root scope for this request — even if parse fails we have request_id.
+    let reqLog = logger.child({ request_id: requestId });
 
     // ── Helper: always respond 200 to Meta exactly once ──
     let responded = false;
@@ -181,7 +226,11 @@ router.post('/', verifyMetaSignature, async (req, res) => {
         if (responded) return;
         responded = true;
         const total = Date.now() - requestStart;
-        console.log(`[WEBHOOK] → 200 (${note}) total=${total}ms`);
+        reqLog.webhook('→ 200', { outcome: note, total_ms: total });
+        // P2-03 metrics — count every webhook invocation with its terminal outcome
+        // and observe the end-to-end duration.
+        metrics.inc('webhook_requests_total', 1, { outcome: note });
+        metrics.observe('webhook_duration_ms', total, { outcome: note });
         res.status(200).json({ status: 'ok' });
     };
 
@@ -195,21 +244,25 @@ router.post('/', verifyMetaSignature, async (req, res) => {
 
         if (!message)                  return respondOk('no-message');
         if (message.type !== 'text')   return respondOk(`type=${message.type}`);
+
+        // Upgrade correlation context now that we have message_id + phone.
+        reqLog = reqLog.child({ message_id: message.id, phone: message.from });
+
         if (!isValidPhone(message.from)) {
-            logger.warn(`🚫 رقم غير صالح: ${message.from}`);
+            reqLog.warn('bad phone number', { phone: message.from });
             return respondOk('bad-phone');
         }
         if (checkBlacklist(message.from)) {
-            logger.info(`🚫 رقم محظور: ${message.from}`);
+            reqLog.info('blacklisted caller', { phone: message.from });
             return respondOk('blacklisted');
         }
         // Two-tier dedup: cheap in-memory first, then DB for cold-start/parallel cases.
         if (isDuplicateMessageMem(message.id)) {
-            logger.info(`🔁 Duplicate webhook ignored (mem): ${message.id}`);
+            reqLog.info('duplicate webhook (mem)', { dedup: 'mem' });
             return respondOk('duplicate-mem');
         }
         if (await isDuplicateMessageDb(message.id)) {
-            logger.info(`🔁 Duplicate webhook ignored (db): ${message.id}`);
+            reqLog.info('duplicate webhook (db)', { dedup: 'db' });
             return respondOk('duplicate-db');
         }
 
@@ -222,9 +275,13 @@ router.post('/', verifyMetaSignature, async (req, res) => {
             timestamp: new Date(parseInt(message.timestamp) * 1000).toISOString(),
             text,
             name:      contact?.profile?.name || message.from,
+            log:       reqLog,   // thread correlation into downstream steps
         };
 
-        console.log(`[WEBHOOK] 📩 ${incoming.from} (${incoming.name}): "${incoming.text.substring(0, 80)}"`);
+        reqLog.webhook('message received', {
+            name: incoming.name,
+            text_preview: incoming.text.substring(0, 80),
+        });
 
         // ── Process the message synchronously ──
         // Why: setImmediate doesn't survive Lambda freeze. Synchronous is reliable.
@@ -234,7 +291,7 @@ router.post('/', verifyMetaSignature, async (req, res) => {
 
     } catch (outerErr) {
         // Last-resort safety net — should never fire because processMessage handles its own errors
-        console.error('[WEBHOOK] 💥 OUTER catch:', outerErr?.message, outerErr?.stack);
+        reqLog.error('outer catch', { err: outerErr });
         return respondOk('outer-error');
     }
 });
@@ -244,6 +301,12 @@ router.post('/', verifyMetaSignature, async (req, res) => {
 // =============================================
 async function processMessage(incoming) {
     const start = Date.now();
+    // Use the correlation-scoped logger the route handler threaded in.
+    // Falls back to root logger if this is called without one (e.g. tests).
+    const log = incoming.log || logger;
+    // P2-02: collect every step timing into a single trace so we can emit
+    // one aggregated record per request at end-of-processing.
+    const trace = [];
     let aiResponseText = null;
     let customer = null;
     let sentimentLabel = 'محايد';
@@ -260,17 +323,17 @@ async function processMessage(incoming) {
         const [, customerStep] = await Promise.all([
             step('whatsapp.markAsRead',
                 () => whatsappService.markAsRead(incoming.messageId),
-                { timeoutMs: TIMEOUTS.markAsRead }),
+                { timeoutMs: TIMEOUTS.markAsRead, log, trace }),
             step('db.getOrCreateCustomer',
                 () => db.getOrCreateCustomer(incoming.from, incoming.name),
-                { timeoutMs: TIMEOUTS.customerOp }),
+                { timeoutMs: TIMEOUTS.customerOp, log, trace }),
         ]);
         customer = customerStep.ok ? customerStep.result : null;
 
         // ── 3. Generate AI response (the slow step — typically 1.5–4s) ──
         const aiStep = await step('ai.generateResponse',
             () => geminiService.generateResponse(incoming.from, incoming.text, incoming.name),
-            { critical: true, timeoutMs: TIMEOUTS.aiCall }
+            { critical: true, timeoutMs: TIMEOUTS.aiCall, log, trace }
         );
         const aiResult = aiStep.result;
         aiResponseText = aiResult.response;
@@ -286,7 +349,7 @@ async function processMessage(incoming) {
         const [sendStep, saveStep] = await Promise.all([
             step('whatsapp.sendTextMessage',
                 () => whatsappService.sendTextMessage(incoming.from, aiResponseText),
-                { timeoutMs: TIMEOUTS.sendMsg }),
+                { timeoutMs: TIMEOUTS.sendMsg, log, trace }),
             step('db.saveConversation', () => db.saveConversation({
                 phone_number:     incoming.from,
                 customer_id:      customer?.id || null,
@@ -301,31 +364,43 @@ async function processMessage(incoming) {
                 escalated:        aiResult.escalated || false,
                 message_id:       incoming.messageId,
                 status:           'delivered', // overwritten below if send failed
-            }), { timeoutMs: TIMEOUTS.saveConv }),
+            }), { timeoutMs: TIMEOUTS.saveConv, log, trace }),
         ]);
 
         if (!sendStep.ok) {
-            console.error('[PROCESS] ⚠️  WhatsApp send failed but processing continued');
+            log.warn('process: whatsapp send failed — processing continued');
         }
         if (!saveStep.ok) {
-            console.error('[PROCESS] ⚠️  saveConversation failed — message not in dashboard');
+            log.warn('process: saveConversation failed — message not in dashboard');
         }
 
         // ── 5. Loyalty points — synchronous (non-critical, but must finish before Lambda exits) ──
         if (customer?.id) {
             await step('db.updateCustomerLoyalty',
                 () => db.updateCustomerLoyalty(customer.id, 1),
-                { timeoutMs: 2000 });
+                { timeoutMs: 2000, log, trace });
         }
 
         const total = Date.now() - start;
-        console.log(`[PROCESS] ✅ done in ${total}ms | ai=${aiTimings.ai_ms}ms | tools=[${aiTimings.tools.join(',')}] | sentiment=${sentimentLabel}`);
+        log.success('process: done', {
+            total_ms: total,
+            ai_ms: aiTimings.ai_ms,
+            tools: aiTimings.tools,
+            sentiment: sentimentLabel,
+        });
+        emitTrace(log, {
+            outcome: 'ok',
+            total_ms: total,
+            trace,
+            sentiment: sentimentLabel,
+            tools: aiTimings.tools,
+            escalated: aiTimings.escalated,
+        });
 
     } catch (error) {
         const total = Date.now() - start;
         const errKind = error?.code || (error?.message?.includes('timed out') ? 'TIMEOUT' : 'UNKNOWN');
-        console.error(`[PROCESS] ❌ FAILED after ${total}ms kind=${errKind} — ${error?.message}`);
-        if (error?.stack) console.error(error.stack);
+        log.error('process: FAILED', { total_ms: total, kind: errKind, err: error });
 
         // Try to send a friendly fallback to the user — but only if we haven't already
         // sent an AI response (i.e. failure was before/during step 4)
@@ -338,7 +413,7 @@ async function processMessage(incoming) {
 
             await step('fallback.sendTextMessage',
                 () => whatsappService.sendTextMessage(incoming.from, fallback),
-                { timeoutMs: 3000 });
+                { timeoutMs: 3000, log, trace });
 
             // Best-effort: log the failure to messages table so it shows in dashboard.
             // Wrapped in step() so its own failure is logged but doesn't crash us.
@@ -356,9 +431,25 @@ async function processMessage(incoming) {
                 escalated:        true,
                 message_id:       incoming.messageId,
                 status:           'error',
-            }), { timeoutMs: 3000 });
+            }), { timeoutMs: 3000, log, trace });
         }
+        emitTrace(log, {
+            outcome: 'failed',
+            total_ms: total,
+            trace,
+            err_kind: errKind,
+            err_message: error?.message,
+        });
     }
+}
+
+/**
+ * Emit one aggregated trace line at end-of-request. Exactly one per
+ * webhook invocation, making it trivial to rebuild a flame-graph or
+ * compute p95 per step in downstream log analytics.
+ */
+function emitTrace(log, payload) {
+    log.info('process: trace', payload);
 }
 
 module.exports = router;

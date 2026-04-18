@@ -154,6 +154,21 @@ class GeminiService {
     }
 
     /**
+     * Health-check shim: returns a snapshot of the service's readiness
+     * without performing any network I/O. Safe to call from /ready on
+     * every request. See routes/admin.routes.js.
+     */
+    getHealthStatus() {
+        return {
+            configured:           !!this.client,
+            model:                this.model,
+            fallback_model:       this.fallbackModel,
+            primary_exhausted:    !!this._primaryModelExhausted,
+            exhausted_utc_date:   this._exhaustedUtcDate || null,
+        };
+    }
+
+    /**
      * Low-level Groq API call with:
      * - AbortSignal support (pass the generateResponse-level controller)
      * - Automatic model fallback on TPD exhaustion (tokens-per-day quota)

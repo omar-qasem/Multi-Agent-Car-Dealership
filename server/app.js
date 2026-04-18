@@ -36,6 +36,7 @@ const webhookRoutes = require('./routes/webhook.routes');
 const conversationsRoutes = require('./routes/conversations.routes');
 const analyticsRoutes = require('./routes/analytics.routes');
 const managementRoutes = require('./routes/management.routes');
+const adminRoutes = require('./routes/admin.routes');
 
 const app = express();
 
@@ -100,34 +101,96 @@ if (config.server.nodeEnv !== 'test') {
 // Routes
 // ==========================================
 
-// Health Check — reflects REAL runtime state, not just presence of env vars
-app.get('/health', async (req, res) => {
-    const mode = getDbMode();
-
-    // Live ping: actually hit Supabase to confirm schema is reachable right now
-    let supabaseLive = null;
-    let supabaseError = null;
-    if (mode.mode === 'supabase') {
-        try {
-            const cars = await db.searchCars({});
-            supabaseLive = { ok: true, sample_car_count: cars.length };
-        } catch (e) {
-            supabaseLive = { ok: false };
-            supabaseError = e.message;
-        }
-    }
-
-    res.json({
-        status: supabaseLive?.ok === false ? 'degraded' : 'ok',
+// =========================================================
+// P2-04 · Health vs Readiness (split endpoints)
+// =========================================================
+//
+// /health  — LIVENESS. Fast, no I/O, always 200 if the process can
+//            answer HTTP. Orchestrator probes (Netlify, k8s-style) hit
+//            this every few seconds and care only that the container
+//            is alive.
+//
+// /ready   — READINESS. Full dependency check — Supabase live ping,
+//            Groq config + TPD flag, WhatsApp credential presence,
+//            last WhatsApp send success (from metrics). Returns 200
+//            only if every critical dep is ok; otherwise 503. Dashboards
+//            and on-call hit this one to understand actual health.
+// =========================================================
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'ok',
         name: 'أوتو جوردن - Auto Jordan',
         timestamp: new Date().toISOString(),
         uptime: typeof process !== 'undefined' ? process.uptime() : 0,
         version: '6.1.0',
-        database: {
-            mode: mode.mode,             // 'supabase' | 'in-memory'
-            persistent: mode.persistent, // true | false
-            live_check: supabaseLive,    // null if in-memory, object if supabase
-            live_error: supabaseError,
+    });
+});
+
+app.get('/ready', async (req, res) => {
+    const geminiService = require('./services/gemini.service');
+    const metrics       = require('./utils/metrics');
+    const mode = getDbMode();
+
+    // ── Supabase live probe ──
+    let supabase = { ok: true, mode: mode.mode, persistent: mode.persistent };
+    if (mode.mode === 'supabase') {
+        const t0 = Date.now();
+        try {
+            const cars = await db.searchCars({});
+            supabase.latency_ms = Date.now() - t0;
+            supabase.sample_car_count = cars.length;
+        } catch (e) {
+            supabase = {
+                ok: false,
+                mode: mode.mode,
+                persistent: mode.persistent,
+                latency_ms: Date.now() - t0,
+                error: e.message,
+            };
+        }
+    }
+
+    // ── Groq / LLM ──
+    const groq = geminiService.getHealthStatus();
+    // Not configured is a hard fail — the bot can't answer without it.
+    if (!groq.configured) groq.ok = false; else groq.ok = true;
+
+    // ── WhatsApp envelope (credential presence only — no outbound call) ──
+    const whatsapp = {
+        token_set:            !!(process.env.WHATSAPP_ACCESS_TOKEN || process.env.WHATSAPP_TOKEN),
+        phone_number_id_set:  !!process.env.WHATSAPP_PHONE_NUMBER_ID,
+        verify_token_set:     !!process.env.WHATSAPP_VERIFY_TOKEN,
+        app_secret_set:       !!process.env.WHATSAPP_APP_SECRET,
+    };
+    whatsapp.ok = whatsapp.token_set
+               && whatsapp.phone_number_id_set
+               && whatsapp.verify_token_set
+               && (config.server.nodeEnv !== 'production' || whatsapp.app_secret_set);
+
+    // ── Last-send signal from in-process metrics (best-effort) ──
+    let last_send_signal = null;
+    try {
+        const snap = metrics.snapshot();
+        const sends = snap.counters.filter(c => c.name === 'step_total'
+                                             && c.labels.step === 'whatsapp.sendTextMessage');
+        if (sends.length) {
+            const ok = sends.find(c => c.labels.outcome === 'ok')?.value || 0;
+            const failed = sends.find(c => c.labels.outcome === 'failed')?.value || 0;
+            last_send_signal = { ok, failed, total: ok + failed };
+        }
+    } catch (_) { /* metrics optional */ }
+
+    const allOk = supabase.ok !== false && groq.ok && whatsapp.ok;
+    res.status(allOk ? 200 : 503).json({
+        status: allOk ? 'ready' : 'not-ready',
+        timestamp: new Date().toISOString(),
+        uptime: typeof process !== 'undefined' ? process.uptime() : 0,
+        version: '6.1.0',
+        checks: {
+            supabase,
+            groq,
+            whatsapp,
+            last_send_signal,
         },
         features: ['AI Agent', '12 Tools', 'Car Inventory', 'Parts Inventory', 'Booking', 'Tickets', 'Inquiries'],
     });
@@ -165,6 +228,9 @@ app.post('/api/auth/logout', logout);
 app.use('/api/conversations', apiRateLimit, requireCsrf, conversationsRoutes);
 app.use('/api/analytics',     apiRateLimit, requireCsrf, analyticsRoutes);
 app.use('/api/manage',        apiRateLimit, requireCsrf, managementRoutes);
+// Admin / ops — metrics + deeper health. Read-only but auth-gated so we
+// don't leak request volumes / error kinds / internal step names.
+app.use('/api/admin',         apiRateLimit, requireCsrf, adminRoutes);
 
 // Serve Frontend
 if (config.server.nodeEnv === 'production' && !process.env.NETLIFY) {
