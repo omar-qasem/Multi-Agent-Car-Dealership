@@ -184,11 +184,12 @@ async function step(name, fn, {
     }
 }
 
-// Hard timeouts — Netlify Functions have a 26s max.
-// Meta accepts up to ~20s before retry, Netlify Pro sync functions cap at 26s.
-// Budget: 1s parse/read + 24s AI + 1s send+save tail = ~26s.
-// The AI step includes: state load + classifier + RAG + LLM1 + tool loops + LLM2.
-// Correctness > latency: we'd rather a slow correct answer than a fast fallback.
+// Hard timeouts — Netlify Functions have a 26s max for SYNC functions,
+// but Background Functions (filename ending `-background.js`) get 15 minutes.
+// When BACKGROUND_PROCESSING is enabled (default on Netlify) the AI work is
+// handed off to `process-ai-background.js` and this sync handler only needs
+// to dedupe + enqueue + respond 200 to Meta, well inside 2 seconds.
+// The legacy sync timings below are kept for the local-dev/fallback path.
 const TIMEOUTS = {
     markAsRead:  2000,
     customerOp: 3000,
@@ -196,6 +197,77 @@ const TIMEOUTS = {
     sendMsg:    3000,
     saveConv:   3000,
 };
+
+// ─────────────────────────────────────────────────────────────────────
+// Background dispatch — fires the Netlify Background Function and
+// returns as soon as Netlify acknowledges (typically <300 ms).
+//
+// Enabled by default on Netlify (`process.env.NETLIFY === 'true'`) so
+// production always uses the unlimited path. Disable explicitly by
+// setting `BACKGROUND_PROCESSING=false` for debugging / local tests.
+// ─────────────────────────────────────────────────────────────────────
+const BACKGROUND_ENABLED =
+    (process.env.BACKGROUND_PROCESSING ?? 'auto').toLowerCase() === 'false'
+        ? false
+        : !!process.env.NETLIFY;
+
+function buildBackgroundUrl(req) {
+    // Netlify injects one of URL / DEPLOY_PRIME_URL / DEPLOY_URL into the
+    // function env — URL is the canonical production site URL. In preview
+    // deploys URL is still the production URL, so prefer DEPLOY_PRIME_URL
+    // when available to target the same deploy instance.
+    const explicit = process.env.BACKGROUND_FUNCTION_URL;
+    if (explicit) return explicit;
+
+    const base = process.env.DEPLOY_PRIME_URL
+        || process.env.DEPLOY_URL
+        || process.env.URL
+        // Last-ditch fallback: reconstruct from request headers so the
+        // invocation still lands on the same host, even if none of the
+        // Netlify env vars are populated in this runtime.
+        || (req ? `https://${req.headers?.host}` : null);
+
+    if (!base) return null;
+    return `${base.replace(/\/+$/, '')}/.netlify/functions/process-ai-background`;
+}
+
+async function enqueueBackgroundJob(payload, log, req) {
+    const url = buildBackgroundUrl(req);
+    if (!url) {
+        throw new Error('enqueueBackgroundJob: no URL available (set URL or BACKGROUND_FUNCTION_URL)');
+    }
+    // We *do* await — but this await only covers TCP handshake +
+    // Netlify's 202 Accepted. It resolves in ~100-300 ms and never
+    // waits for the background function to finish. If we didn't await,
+    // Lambda could freeze before the request was even sent.
+    const controller = new AbortController();
+    const enqueueTimer = setTimeout(() => controller.abort(), 4000);
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                // Internal header so the background function can reject
+                // drive-by POSTs from the public internet. The secret is
+                // rotated via env var; if unset we fall back to a static
+                // value so local dev still works.
+                'x-internal-token': process.env.BACKGROUND_FUNCTION_TOKEN || 'autojordan-internal',
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+        });
+        // Netlify returns 202 for background functions; anything else
+        // (500 from cold start error, 404 if filename mismatched, etc)
+        // means the job will NOT run — we should fall back to sync.
+        if (res.status !== 202) {
+            const txt = await res.text().catch(() => '');
+            throw new Error(`enqueueBackgroundJob: unexpected status ${res.status} body=${txt.slice(0, 200)}`);
+        }
+        log.info('enqueued background AI job', { url, status: res.status });
+    } finally {
+        clearTimeout(enqueueTimer);
+    }
+}
 
 // =============================================
 // GET /webhook — Meta Verification (unchanged)
@@ -284,8 +356,53 @@ router.post('/', verifyMetaSignature, async (req, res) => {
             text_preview: incoming.text.substring(0, 80),
         });
 
-        // ── Process the message synchronously ──
-        // Why: setImmediate doesn't survive Lambda freeze. Synchronous is reliable.
+        // ─────────────────────────────────────────────────────────────
+        // BACKGROUND PATH (production / Netlify)
+        // ─────────────────────────────────────────────────────────────
+        // The AI pipeline frequently takes 15–25 seconds on complex Arabic
+        // purchase queries (LLM2 alone can be 10-14s). We were running into
+        // Netlify's 26s sync-function ceiling and returning a fallback to
+        // the customer even when the real LLM would have succeeded in a
+        // few more seconds. Fix: hand the work off to a Background Function
+        // (15-minute cap), respond 200 to Meta immediately.
+        // ─────────────────────────────────────────────────────────────
+        if (BACKGROUND_ENABLED) {
+            // Fire-and-await-lightly: only the enqueue handshake (~100-300 ms)
+            // is awaited. The background function itself runs independently
+            // for up to 15 minutes.
+            try {
+                // whatsapp.markAsRead can run in parallel with enqueue —
+                // both are short-lived network calls. Don't let a mark-read
+                // failure block the enqueue; each has its own .catch.
+                await Promise.all([
+                    whatsappService.markAsRead(incoming.messageId).catch(e =>
+                        reqLog.warn('markAsRead soft-fail', { err: e?.message })
+                    ),
+                    enqueueBackgroundJob({
+                        messageId: incoming.messageId,
+                        from:      incoming.from,
+                        text:      incoming.text,
+                        name:      incoming.name,
+                        timestamp: incoming.timestamp,
+                        requestId: requestId,
+                    }, reqLog, req),
+                ]);
+                return respondOk('enqueued');
+            } catch (enqueueErr) {
+                // Background enqueue failed (e.g. cold start, 500 from the
+                // background function itself, DNS fluke). Fall through to
+                // synchronous processing — better a delayed reply than no
+                // reply at all.
+                reqLog.error('background enqueue failed — falling back to sync', {
+                    err: enqueueErr?.message,
+                });
+            }
+        }
+
+        // ── Synchronous fallback path ──
+        // Used for local dev, for debugging (BACKGROUND_PROCESSING=false), and
+        // when enqueueBackgroundJob throws. The sync path still enforces the
+        // 26s Netlify ceiling via per-step timeouts inside processMessage.
         await processMessage(incoming);
 
         return respondOk('processed');

@@ -17,6 +17,13 @@
   node_bundler = "esbuild"
   included_files = ["server/**", "node_modules/**"]
 
+# Background function for the AI pipeline — 15-minute cap instead of
+# the 26-second sync-function limit. The webhook hands off to this
+# function via HTTP POST so Meta gets its 200 immediately. See
+# netlify/functions/process-ai-background.js for the handler.
+[functions."process-ai-background"]
+  included_files = ["server/**", "node_modules/**"]
+
 # ============================================================
 # Redirects - ترتيبها مهم (الأكثر تحديداً أولاً)
 # ============================================================

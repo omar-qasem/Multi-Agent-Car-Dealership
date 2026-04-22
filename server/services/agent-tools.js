@@ -312,6 +312,16 @@ const TOOL_DEFINITIONS = [
 // Tool Executors
 // =============================================
 async function executeTool(toolName, args, customerPhone) {
+  // Defensive args coercion — LLMs sometimes emit `function.arguments = "null"`
+  // (literal string "null") which JSON.parse decodes to the JavaScript `null`.
+  // Downstream code then crashes with "Cannot read properties of null (reading
+  // '<field>')" — see prod log 2026-04-18 21:44 for get_branch_info. We also
+  // coerce non-object values (strings/numbers) to an empty object so no case
+  // handler needs to defend itself individually.
+  if (args === null || args === undefined || typeof args !== 'object' || Array.isArray(args)) {
+    args = {};
+  }
+
   try {
     switch (toolName) {
 

@@ -333,15 +333,21 @@ class GeminiService {
         }
     }
 
-    async generateResponse(phoneNumber, userMessage, customerName) {
+    async generateResponse(phoneNumber, userMessage, customerName, options = {}) {
         const startTime = Date.now();
 
-        // Global AbortController — hard ceiling for the entire pipeline.
-        // Budget = 22s (2s below the outer 24s step timeout, giving cleanup
-        // room for state-save + fallback-template assembly). This catches
-        // stuck LLM1 calls and any runaway async work. Correctness is
-        // prioritized over latency — users accept slower but correct answers.
-        const GLOBAL_BUDGET_MS = 22000;
+        // ── Unlimited mode ──────────────────────────────────────
+        // When invoked from a Netlify Background Function (15-min cap) we lift
+        // the short synchronous-path budgets entirely. Background Functions can
+        // run up to 15 minutes, which is effectively unlimited for a single
+        // customer message. We still enforce a safety ceiling of 10 minutes so
+        // a genuine Groq hang doesn't camp on the execution indefinitely.
+        //
+        // When called from the legacy sync path (still used for local dev, for
+        // the debug /chat endpoint, etc.) we keep the 22s global budget so the
+        // sync handler doesn't exceed Netlify Pro's 26s limit.
+        const unlimited = !!options.unlimited;
+        const GLOBAL_BUDGET_MS = unlimited ? 600000 : 22000; // 10 min vs 22 s
         const abortController = new AbortController();
         const abortTimer = setTimeout(() => {
             logger.warn(`⏱️ generateResponse: ${GLOBAL_BUDGET_MS}ms global budget exhausted — aborting Groq request`);
@@ -551,6 +557,15 @@ class GeminiService {
                         } catch {
                             logger.warn('⚠️ فشل parse لأرجومنت الأداة:', toolCall.function.arguments);
                         }
+                        // LLMs sometimes emit the literal string "null" as arguments
+                        // when they call a tool with no args. JSON.parse("null") === null,
+                        // which bypasses the `|| '{}'` default and crashes downstream
+                        // (e.g. get_branch_info: "Cannot read properties of null (reading 'branch')").
+                        // Seen in prod 2026-04-18. Coerce to {} so each case handler
+                        // can safely destructure args.
+                        if (toolArgs === null || typeof toolArgs !== 'object' || Array.isArray(toolArgs)) {
+                            toolArgs = {};
+                        }
 
                         // ── Dedup check ──────────────────────────────
                         if (CACHEABLE_TOOLS.has(toolName)) {
@@ -618,10 +633,13 @@ class GeminiService {
                 logger.info(`🛡️ LLM2 tools: ${TOOL_DEFINITIONS.length} → ${llm2Tools.length} (pruned ${calledCacheableTools.size} already-called)`);
 
                 const elapsed = Date.now() - startTime;
-                const llm2BudgetMs = Math.min(
-                    14000,
-                    Math.max(5000, GLOBAL_BUDGET_MS - 1000 - elapsed)
-                );
+                // Unlimited mode: give LLM2 up to 9 minutes (1 min below global
+                // ceiling) so Arabic generation on the 8b-instant model has room
+                // to finish even under heavy concurrent load on Groq. On the
+                // sync path we keep the 14s cap so we stay inside the 22s global.
+                const llm2BudgetMs = unlimited
+                    ? Math.max(10000, GLOBAL_BUDGET_MS - 60000 - elapsed)
+                    : Math.min(14000, Math.max(5000, GLOBAL_BUDGET_MS - 1000 - elapsed));
                 const llm2Abort = new AbortController();
                 const llm2Timer = setTimeout(() => {
                     logger.warn(`⏱️ LLM2: ${llm2BudgetMs}ms budget exhausted — using tool fallback`);
