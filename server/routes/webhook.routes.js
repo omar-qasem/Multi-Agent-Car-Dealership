@@ -32,6 +32,7 @@ const { checkBlacklist } = require('../middleware/auth');
 const { verifyMetaSignature } = require('../middleware/webhookSignature');
 const logger = require('../utils/logger');
 const metrics = require('../utils/metrics');
+const { step } = require('../utils/shared-steps');
 
 // P2-01: Correlation IDs. Every webhook gets a request_id; once we've
 // parsed the payload we upgrade the scoped logger with message_id + phone
@@ -115,74 +116,7 @@ async function isDuplicateMessageDb(messageId) {
     }
 }
 
-// =============================================
-// Step Timer — wrap any async op with timing + structured error logging
-// =============================================
-// P2-02: when a `trace` array is passed, each step appends
-//   { step, ms, ok, code?, err_kind? }
-// so the caller can emit a single aggregated trace line at end-of-request.
-// Per-step logs are still emitted for real-time tailing; the aggregate
-// makes post-hoc analysis (p95 latency per step, failure hotspots) trivial.
-//
-// `log` is an optional scoped logger (carrying request_id, message_id,
-// phone). Falls back to the root logger so legacy call sites work.
-async function step(name, fn, {
-    critical = false,
-    timeoutMs = null,
-    log = logger,
-    trace = null,
-} = {}) {
-    const t0 = Date.now();
-    try {
-        const promise = Promise.resolve().then(fn);
-        let result;
-        if (timeoutMs) {
-            // FIX: Clear the timeout when the main promise settles first,
-            // preventing an unhandled rejection from the losing timeout promise.
-            let timer;
-            const timeoutPromise = new Promise((_, rej) => {
-                timer = setTimeout(() => rej(new Error(`step "${name}" timed out after ${timeoutMs}ms`)), timeoutMs);
-            });
-            try {
-                result = await Promise.race([promise, timeoutPromise]);
-            } finally {
-                clearTimeout(timer);
-            }
-        } else {
-            result = await promise;
-        }
-        const dt = Date.now() - t0;
-        log.info(`step:${name} ok`, { step: name, status: 'ok', ms: dt });
-        if (trace) trace.push({ step: name, ms: dt, ok: true });
-        // P2-03 metrics
-        metrics.observe('step_duration_ms', dt, { step: name, outcome: 'ok' });
-        metrics.inc('step_total', 1, { step: name, outcome: 'ok' });
-        return { ok: true, result, ms: dt };
-    } catch (err) {
-        const dt = Date.now() - t0;
-        const errKind = err?.code
-            || (err?.message?.includes('timed out') ? 'TIMEOUT' : 'ERROR');
-        log.error(`step:${name} failed`, {
-            step: name,
-            status: 'failed',
-            ms: dt,
-            code: err?.code,
-            details: err?.details,
-            err,
-        });
-        if (trace) trace.push({
-            step: name, ms: dt, ok: false,
-            err_kind: errKind,
-            err_message: err?.message,
-        });
-        // P2-03 metrics
-        metrics.observe('step_duration_ms', dt, { step: name, outcome: 'failed' });
-        metrics.inc('step_total', 1, { step: name, outcome: 'failed' });
-        metrics.inc('step_errors_total', 1, { step: name, err_kind: errKind });
-        if (critical) throw err;
-        return { ok: false, error: err, ms: dt };
-    }
-}
+// step() is imported from ../utils/shared-steps
 
 // Hard timeouts — Netlify Functions have a 26s max for SYNC functions,
 // but Background Functions (filename ending `-background.js`) get 15 minutes.
@@ -332,8 +266,17 @@ router.post('/', verifyMetaSignature, async (req, res) => {
         const message = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         const contact = body?.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
 
-        if (!message)                  return respondOk('no-message');
-        if (message.type !== 'text')   return respondOk(`type=${message.type}`);
+        if (!message) return respondOk('no-message');
+
+        // Non-text messages (voice, image, location, document) — send a
+        // canned response so the customer knows we received their message.
+        if (message.type !== 'text') {
+            whatsappService.sendTextMessage(
+                message.from,
+                'عذراً، حالياً بس بقدر أقرأ رسائل نصية 📝\nإذا بدك مساعدة اكتبلي رسالة أو اتصل 06-5000001'
+            ).catch(() => {});
+            return respondOk(`type=${message.type}`);
+        }
 
         // Upgrade correlation context now that we have message_id + phone.
         reqLog = reqLog.child({ message_id: message.id, phone: message.from });
@@ -384,22 +327,20 @@ router.post('/', verifyMetaSignature, async (req, res) => {
         // (15-minute cap), respond 200 to Meta immediately.
         // ─────────────────────────────────────────────────────────────
         const bgEnabled = isBackgroundEnabled();
-        // Trace which path we chose so production logs make the decision
-        // explicit — no more guessing whether the deploy picked it up.
         reqLog.info('webhook: dispatch decision', {
             background_enabled: bgEnabled,
             netlify: !!process.env.NETLIFY,
             background_processing_env: process.env.BACKGROUND_PROCESSING ?? null,
         });
         if (bgEnabled) {
-            // Fire-and-await-lightly: only the enqueue handshake (~100-300 ms)
-            // is awaited. The background function itself runs independently
-            // for up to 15 minutes.
             try {
-                // whatsapp.markAsRead can run in parallel with enqueue —
-                // both are short-lived network calls. Don't let a mark-read
-                // failure block the enqueue; each has its own .catch.
+                // Fire typing indicator, markAsRead, and enqueue in parallel.
+                // Typing indicator shows "..." to the customer immediately while
+                // the background function does the AI work (~2-25s).
                 await Promise.all([
+                    whatsappService.sendTypingIndicator(incoming.from).catch(e =>
+                        reqLog.warn('typingIndicator soft-fail', { err: e?.message })
+                    ),
                     whatsappService.markAsRead(incoming.messageId).catch(e =>
                         reqLog.warn('markAsRead soft-fail', { err: e?.message })
                     ),
@@ -433,8 +374,18 @@ router.post('/', verifyMetaSignature, async (req, res) => {
         return respondOk('processed');
 
     } catch (outerErr) {
-        // Last-resort safety net — should never fire because processMessage handles its own errors
         reqLog.error('outer catch', { err: outerErr });
+        // Best-effort dead-letter save so the message appears in the dashboard for review.
+        if (typeof db.saveFailedMessage === 'function') {
+            db.saveFailedMessage({
+                message_id:      req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.id,
+                phone_number:    req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.from,
+                customer_message: req.body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0]?.text?.body,
+                error_kind:      'OUTER_CATCH',
+                error_message:   outerErr?.message,
+                raw_payload:     req.body,
+            }).catch(() => {});
+        }
         return respondOk('outer-error');
     }
 });

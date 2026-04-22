@@ -118,6 +118,37 @@ class WhatsAppService {
   }
 
   /**
+   * إرسال مؤشر الكتابة ("typing...") للعميل.
+   * WhatsApp Cloud API: POST /messages with type=reaction is NOT the right
+   * endpoint. The correct way is to send a "typing" status update via the
+   * statuses endpoint. This shows the "..." bubble while the AI processes.
+   *
+   * Note: Meta documents this under "Sending Typing Indicators" — it uses
+   * the same /messages endpoint with `type: "reaction"` pattern but with
+   * a `typing` action body format. If Meta changes the endpoint this is
+   * the only place to update.
+   */
+  async sendTypingIndicator(to) {
+    if (!to) return;
+    const payload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      type: 'typing',
+    };
+    try {
+      await axios.post(this.baseUrl + '/messages', payload, {
+        headers: this.headers,
+        timeout: 3000,
+      });
+    } catch (error) {
+      // Typing indicator is best-effort — many Meta sandbox accounts don't
+      // support it. Log at warn level but never propagate the error.
+      logger.warn('sendTypingIndicator soft-fail', { to, err: error?.message });
+    }
+  }
+
+  /**
    * تحديد حالة القراءة
    * @param {string} messageId - معرف الرسالة
    */

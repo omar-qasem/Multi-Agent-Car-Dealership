@@ -57,7 +57,7 @@ module.exports = {
 
     // Groq AI
     groqApiKey: process.env.GROQ_API_KEY,
-    groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    groqModel: process.env.GROQ_MODEL || 'qwen/qwen3-32b',
 
     // Server
     server: {
@@ -68,12 +68,6 @@ module.exports = {
         cookieSecure: isProduction, // cookie Secure flag
         csrfSecret: process.env.CSRF_SECRET || (jwtSecret ? `csrf_${jwtSecret.slice(0, 16)}` : 'dev_csrf_secret_change_me'),
         corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
-    },
-
-    // Database
-    database: {
-        type: 'sqlite',
-        path: process.env.DB_PATH || './server/database/autojordan.db',
     },
 
     // Cache

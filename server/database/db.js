@@ -422,21 +422,16 @@ async function getCustomer(phone) {
 
 async function upsertCustomer(phone, data) {
   if (useSupabase) {
-    const existing = await getCustomer(phone);
-    if (existing) {
-      const payload = { ...data, updated_at: new Date().toISOString() };
-      delete payload.id;
-      delete payload.phone;
-      delete payload.created_at;
-      const { data: row, error } = await supabase.from('customers').update(payload).eq('phone', phone).select().single();
-      if (error) sbThrow('upsertCustomer.update', error);
-      return row;
-    }
-    const payload = { phone, ...data };
+    // True atomic upsert — no read-then-write race condition.
+    const payload = { phone, ...data, updated_at: new Date().toISOString() };
     delete payload.id;
     delete payload.created_at;
-    const { data: row, error } = await supabase.from('customers').insert([payload]).select().single();
-    if (error) sbThrow('upsertCustomer.insert', error);
+    const { data: row, error } = await supabase
+      .from('customers')
+      .upsert(payload, { onConflict: 'phone' })
+      .select()
+      .single();
+    if (error) sbThrow('upsertCustomer', error);
     return row;
   }
   const existing = mem.customers.get(phone) || { id: mem.counters.customers++, phone, loyalty_points: 0, created_at: new Date().toISOString() };
@@ -471,23 +466,30 @@ async function getOrCreateCustomer(phone, name) {
 
 async function updateCustomerLoyalty(customerId, points) {
   if (useSupabase) {
-    // Read-modify-write; avoids schema dependency on RPCs
-    const { data: existing, error: readErr } = await supabase
-      .from('customers')
-      .select('id, loyalty_points')
-      .eq('id', customerId)
-      .maybeSingle();
-    if (readErr) sbThrow('updateCustomerLoyalty.read', readErr);
-    if (!existing) {
-      console.warn(`[DB] updateCustomerLoyalty: customer ${customerId} not found`);
-      return;
+    // Atomic increment via Postgres RPC — no read-modify-write race condition.
+    // Falls back to the read-modify-write path if the RPC doesn't exist yet
+    // (migration 005 adds it; old deploys stay functional until they migrate).
+    const { error: rpcErr } = await supabase.rpc('increment_loyalty_points', {
+      p_customer_id: customerId,
+      p_points: points,
+    });
+    if (rpcErr) {
+      if (rpcErr.code === 'PGRST202' || rpcErr.message?.includes('Could not find')) {
+        // RPC not deployed yet — fall back to safe read-modify-write
+        console.warn('[DB] increment_loyalty_points RPC not found — using fallback (run migration 005)');
+        const { data: existing, error: readErr } = await supabase
+          .from('customers').select('id, loyalty_points').eq('id', customerId).maybeSingle();
+        if (readErr) sbThrow('updateCustomerLoyalty.read', readErr);
+        if (!existing) { console.warn(`[DB] updateCustomerLoyalty: customer ${customerId} not found`); return; }
+        const { error: updErr } = await supabase
+          .from('customers')
+          .update({ loyalty_points: (existing.loyalty_points || 0) + points, updated_at: new Date().toISOString() })
+          .eq('id', customerId);
+        if (updErr) sbThrow('updateCustomerLoyalty.update', updErr);
+      } else {
+        sbThrow('updateCustomerLoyalty.rpc', rpcErr);
+      }
     }
-    const newPoints = (existing.loyalty_points || 0) + points;
-    const { error: updErr } = await supabase
-      .from('customers')
-      .update({ loyalty_points: newPoints, updated_at: new Date().toISOString() })
-      .eq('id', customerId);
-    if (updErr) sbThrow('updateCustomerLoyalty.update', updErr);
     return;
   }
   for (const [phone, customer] of mem.customers.entries()) {
@@ -1254,6 +1256,36 @@ async function clearConversationState(phoneNumber) {
   memConvStates.delete(phoneNumber);
 }
 
+// =============================================
+// FAILED MESSAGES (dead-letter queue)
+// =============================================
+/**
+ * Persist a permanently-failed message for manual review in the dashboard.
+ * Best-effort — never throws so callers can fire-and-forget.
+ */
+async function saveFailedMessage(data) {
+  const payload = {
+    message_id:       data.message_id || null,
+    phone_number:     data.phone_number || '',
+    customer_message: data.customer_message || null,
+    error_kind:       data.error_kind || 'UNKNOWN',
+    error_message:    data.error_message || null,
+    raw_payload:      data.raw_payload || null,
+    retry_count:      0,
+    resolved:         false,
+  };
+  try {
+    if (useSupabase) {
+      await supabase.from('failed_messages').insert([payload]);
+      return;
+    }
+    // In-memory — just log; no persistent store needed in dev
+    console.warn('[DB] saveFailedMessage (in-memory):', payload);
+  } catch (e) {
+    console.error('[DB] saveFailedMessage threw (non-critical):', e?.message);
+  }
+}
+
 // Legacy compatibility shim (no sqlite in serverless anymore)
 function getDb() {
   return {
@@ -1316,6 +1348,8 @@ module.exports = {
   getBranchStats,
   getAllBranches,
   getActivePromotions,
+  // Failed messages (dead-letter queue)
+  saveFailedMessage,
   // Legacy
   getDb,
   // Expose for health checks

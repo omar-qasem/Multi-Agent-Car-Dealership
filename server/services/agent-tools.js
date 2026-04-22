@@ -13,6 +13,24 @@ const {
 } = require('../utils/timeSlots');
 
 // =============================================
+// Staff notification helper
+// =============================================
+// Sends a WhatsApp message to STAFF_NOTIFICATION_PHONE when a booking or
+// ticket is created, so staff know to follow up. Fire-and-forget — never
+// blocks or fails the tool result.
+async function notifyStaff(message) {
+  const phone = process.env.STAFF_NOTIFICATION_PHONE;
+  if (!phone) return; // not configured — skip silently
+  try {
+    // Lazy-require to avoid circular dependency (whatsapp.service → agent-tools would be circular)
+    const whatsapp = require('./whatsapp.service');
+    await whatsapp.sendTextMessage(phone, message);
+  } catch (e) {
+    console.warn('[TOOL] notifyStaff failed (non-critical):', e?.message);
+  }
+}
+
+// =============================================
 // P0-03: Write-tool classification + graceful-fail
 // =============================================
 // Tools that WRITE to the database. When these fail we MUST NOT pretend the
@@ -523,6 +541,17 @@ async function executeTool(toolName, args, customerPhone) {
         }
 
         const displayTime = canonicalToDisplay(canonicalTime);
+
+        // Notify staff about the new booking (fire-and-forget).
+        notifyStaff(
+          `🔧 حجز جديد #${booking.id}\n` +
+          `👤 ${customerName} | 📱 ${customerPhone}\n` +
+          `🚗 ${args.car_make} ${args.car_model}\n` +
+          `🛠 ${args.service_type}\n` +
+          `📅 ${args.preferred_date} | ⏰ ${displayTime}\n` +
+          `🏢 فرع ${args.branch}`
+        );
+
         return {
           success: true,
           booking_id: booking.id,
@@ -531,8 +560,8 @@ async function executeTool(toolName, args, customerPhone) {
             booking_id: booking.id,
             service:    booking.service_type,
             date:       booking.preferred_date,
-            time:       displayTime,       // Arabic for display
-            time_canonical: canonicalTime, // machine-readable
+            time:       displayTime,
+            time_canonical: canonicalTime,
             branch:     booking.branch,
             car:        `${booking.car_make} ${booking.car_model}`,
           },
@@ -590,6 +619,14 @@ async function executeTool(toolName, args, customerPhone) {
           category:          args.category || 'general',
           priority:          args.priority || 'medium',
         }));
+
+        // Notify staff about the new ticket (fire-and-forget).
+        notifyStaff(
+          `🎫 تذكرة دعم جديدة #${ticket.id}\n` +
+          `👤 ${customerName} | 📱 ${customerPhone}\n` +
+          `📋 ${args.issue_description?.substring(0, 100) || ''}\n` +
+          `⚡ الأولوية: ${ticket.priority}`
+        );
 
         return {
           success: true,

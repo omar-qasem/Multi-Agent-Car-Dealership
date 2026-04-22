@@ -37,55 +37,7 @@ const whatsappService = require('../../server/services/whatsapp.service');
 const geminiService = require('../../server/services/gemini.service');
 const db = require('../../server/database/db');
 const { analyzeSentiment, detectTopic, detectIntent } = require('../../server/utils/sentiment');
-const metrics = require('../../server/utils/metrics');
-
-// Shared helper — mirrors the one in webhook.routes.js so trace output
-// is identical across sync and background paths.
-async function step(name, fn, {
-    timeoutMs = null,
-    log = logger,
-    trace = null,
-} = {}) {
-    const t0 = Date.now();
-    try {
-        const promise = Promise.resolve().then(fn);
-        let result;
-        if (timeoutMs) {
-            let timer;
-            const timeoutPromise = new Promise((_, rej) => {
-                timer = setTimeout(() => rej(new Error(`step "${name}" timed out after ${timeoutMs}ms`)), timeoutMs);
-            });
-            try {
-                result = await Promise.race([promise, timeoutPromise]);
-            } finally {
-                clearTimeout(timer);
-            }
-        } else {
-            result = await promise;
-        }
-        const dt = Date.now() - t0;
-        log.info(`bg:step:${name} ok`, { step: name, status: 'ok', ms: dt });
-        if (trace) trace.push({ step: name, ms: dt, ok: true });
-        metrics.observe('bg_step_duration_ms', dt, { step: name, outcome: 'ok' });
-        metrics.inc('bg_step_total', 1, { step: name, outcome: 'ok' });
-        return { ok: true, result, ms: dt };
-    } catch (err) {
-        const dt = Date.now() - t0;
-        const errKind = err?.code || (err?.message?.includes('timed out') ? 'TIMEOUT' : 'ERROR');
-        log.error(`bg:step:${name} failed`, {
-            step: name, status: 'failed', ms: dt,
-            code: err?.code, err,
-        });
-        if (trace) trace.push({
-            step: name, ms: dt, ok: false,
-            err_kind: errKind, err_message: err?.message,
-        });
-        metrics.observe('bg_step_duration_ms', dt, { step: name, outcome: 'failed' });
-        metrics.inc('bg_step_total', 1, { step: name, outcome: 'failed' });
-        metrics.inc('bg_step_errors_total', 1, { step: name, err_kind: errKind });
-        return { ok: false, error: err, ms: dt };
-    }
-}
+const { step } = require('../../server/utils/shared-steps');
 
 // -----------------------------------------------------------------
 // Background function handler
@@ -129,6 +81,12 @@ exports.handler = async (event) => {
         name,
         text_preview: (text || '').substring(0, 80),
     });
+
+    // Send typing indicator immediately so the customer sees "..." while AI processes.
+    // Fire-and-forget — a failure here must never block the pipeline.
+    whatsappService.sendTypingIndicator(from).catch(e =>
+        log.warn('bg: typingIndicator soft-fail', { err: e?.message })
+    );
 
     const trace = [];
     let aiResponseText = null;
@@ -263,8 +221,17 @@ exports.handler = async (event) => {
             err_message: error?.message,
         });
 
-        // Still 202 — this is a background function and we don't want
-        // Netlify to retry with our own internal error.
+        // Dead-letter save — persist the failed message for manual review.
+        if (typeof db.saveFailedMessage === 'function') {
+            db.saveFailedMessage({
+                message_id:       messageId,
+                phone_number:     from,
+                customer_message: text,
+                error_kind:       errKind,
+                error_message:    error?.message,
+            }).catch(() => {});
+        }
+
         return { statusCode: 202, body: JSON.stringify({ status: 'error', kind: errKind }) };
     }
 };

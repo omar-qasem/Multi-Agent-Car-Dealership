@@ -133,6 +133,19 @@ const FUEL_TYPES = {
 // =============================================
 const GREETING_PATTERNS = /^(?:[\s!?.,👋🙋🤝🌟✨]*)(هلا|مرحبا|السلام|هاي|اهلا|أهلا|hi|hello|hey|صباح|مساء)/i;
 
+// Numeric menu selection — customer replies with 1-5 after the greeting menu.
+// Matches bare digit OR digit followed by emoji/punctuation so "1️⃣" works too.
+const MENU_INTENT_MAP = {
+    '1': 'purchase',
+    '2': 'parts',
+    '3': 'booking',
+    '4': 'promotions',
+    '5': 'support',
+};
+
+// Goodbye / thank-you patterns — canned farewell, no LLM needed.
+const GOODBYE_PATTERNS = /^(?:شكر[اً]?|يسلمو|يعطيك|باي|وداع|مع السلامة|تمام شكرا|ما بدي|ما بدي شي|تمام ما في شي|نزلت|عادي|موفق|يا سلام|ok bye|bye|thanks?|thank you)[\s!.،؟]*$/i;
+
 // Negation prefixes — if any of these appear right before an intent verb,
 // the intent should NOT fire. ("ما بدي احجز" must not be tagged as booking.)
 const NEGATION_REGEX = /\b(ما|مش|مو|لا)\s+/i;
@@ -140,7 +153,10 @@ const NEGATION_REGEX = /\b(ما|مش|مو|لا)\s+/i;
 const FAQ_PATTERNS = [
     {
         intent: 'faq_hours',
-        regex: /(?:ساعات|دوام|متى\s+تفتح|متى\s+بتفتح|بأي\s+وقت|بكم\s+الساعة|hours|opening)/i,
+        // Guard: "كم ساعة بتاخذ الصيانة" asks about DURATION, not opening hours.
+        // Require "ساعات" to appear without an adjacent duration verb, OR
+        // use the explicit "دوام/تفتح/بأي وقت" forms which are unambiguous.
+        regex: /(?:ساعات\s+(?:الدوام|العمل|الفرع|أوتو|الوكالة)|دوام|متى\s+تفتح|متى\s+بتفتح|بأي\s+وقت|opening\s+hours?|work(?:ing)?\s+hours?)/i,
         response:
             'ساعات دوامنا 🕐\n' +
             '• الأحد - الخميس: 8 صباحاً - 8 مساءً\n' +
@@ -417,6 +433,40 @@ function classify(text) {
     if (!text || typeof text !== 'string') return empty;
     const norm = normalize(text);
     if (!norm) return empty;
+
+    // 0a. Numeric menu selection — "1" / "2" / "3" / "4" / "5" after greeting menu.
+    //     Must be a very short message consisting of just the digit (optionally
+    //     surrounded by punctuation/emoji) so "3 سيارات" still goes to the LLM.
+    const trimmedNorm = norm.replace(/[^\d]/g, '');
+    if (trimmedNorm.length === 1 && norm.replace(/[\s!?.،؟]/g, '').length <= 3) {
+        const menuIntent = MENU_INTENT_MAP[trimmedNorm];
+        if (menuIntent) {
+            const MENU_RESPONSES = {
+                purchase:   'أهلين! 🚗 ابحث عن سيارة — شو الماركة اللي بتفضلها وميزانيتك؟',
+                parts:      'أكيد! 🔩 شو القطعة اللي بتحتاجها ولأي سيارة؟',
+                booking:    'تكرم! 🔧 بدي احجزلك موعد صيانة.\nشو نوع الخدمة؟ (صيانة دورية / فرامل / مكيف / غيرها)',
+                promotions: null, // let LLM call get_promotions for live data
+                support:    'تكرم يا غالي 📱 شو المشكلة أو الطلب؟ وبتصل بك أحد موظفينا.',
+            };
+            const canned = MENU_RESPONSES[menuIntent];
+            return {
+                intent: menuIntent,
+                confidence: 0.95,
+                cannedResponse: canned,
+                entities: {},
+            };
+        }
+    }
+
+    // 0b. Goodbye / thank-you — short farewell, no LLM needed.
+    if (GOODBYE_PATTERNS.test(norm) && norm.length < 40) {
+        return {
+            intent: 'goodbye',
+            confidence: 0.95,
+            cannedResponse: 'شكراً لتواصلك مع أوتو جوردن! 🚗 يسعدنا خدمتك دايماً. مع السلامة! 👋',
+            entities: {},
+        };
+    }
 
     // Always extract entities — useful even when intent is unclear
     const entities = {};
