@@ -73,9 +73,16 @@ class GeminiService {
         this.client = null;
         this.conversationHistory = new Map();
         this.conversationLastAccess = new Map();
-        // Primary model: fast 8b-instant for <3s responses on Netlify
-        // Fallback model: 70b-versatile if 8b hits TPD or connection error
-        this.model         = process.env.GROQ_MODEL          || 'llama-3.1-8b-instant';
+        // Primary model: Qwen3-32B on Groq — reasoning-capable + full tool use.
+        // We switched to Qwen3 for better agentic reasoning on complex Arabic
+        // purchase / booking queries; the old llama-3.1-8b-instant produced
+        // fewer correct tool plans on multi-step flows. Background Functions
+        // give us unlimited time so reasoning latency is no longer a blocker.
+        //
+        // Fallback model: llama-3.3-70b-versatile — used when Qwen hits TPD
+        // (tokens-per-day) limit or emits a connection error. No reasoning on
+        // the fallback, but strong tool use.
+        this.model         = process.env.GROQ_MODEL          || 'qwen/qwen3-32b';
         this.fallbackModel = process.env.GROQ_FALLBACK_MODEL || 'llama-3.3-70b-versatile';
         // Track whether primary model's daily quota is exhausted this serverless instance.
         // Groq TPD resets at UTC midnight. We also record the UTC date we hit it so a
@@ -135,6 +142,43 @@ class GeminiService {
     /** UTC date helper used by the TPD-reset logic. */
     _currentUtcDate() {
         return new Date().toISOString().slice(0, 10); // 'YYYY-MM-DD'
+    }
+
+    /**
+     * Detect reasoning-capable Groq models — Qwen3 / QwQ / DeepSeek-R1 / o1-*.
+     * Groq rejects `reasoning_effort` / `reasoning_format` on non-reasoning
+     * models, so we only inject those params when we know the server accepts
+     * them. Detection is conservative: match by prefix/substring so new
+     * variants (`qwen/qwen3-72b`, etc.) get picked up automatically.
+     */
+    _isReasoningModel(model) {
+        if (!model) return false;
+        const m = String(model).toLowerCase();
+        return (
+            m.includes('qwen3')           // qwen/qwen3-32b and future sizes
+            || m.includes('qwq')          // qwen-qwq-32b
+            || m.startsWith('o1-')         // OpenAI-style reasoning
+            || m.includes('deepseek-r1')   // DeepSeek R1
+            || m.includes('reasoning')     // generic marker
+        );
+    }
+
+    /**
+     * Build the reasoning-specific fields for the Groq request. Returns an
+     * empty object for non-reasoning models so it's safe to spread
+     * unconditionally.
+     *
+     *   reasoning_effort: 'default' → model uses its chain-of-thought
+     *   reasoning_format: 'hidden'  → CoT stripped from assistant output
+     *                                  (we never want <think>...</think> to
+     *                                  leak to a WhatsApp customer)
+     */
+    _reasoningParamsFor(model) {
+        if (!this._isReasoningModel(model)) return {};
+        return {
+            reasoning_effort: process.env.GROQ_REASONING_EFFORT || 'default',
+            reasoning_format: 'hidden',
+        };
     }
 
     /**
@@ -503,13 +547,27 @@ class GeminiService {
                 logger.warn(`⚠️ Running on fallback model (${this.fallbackModel}) — primary TPD exhausted. Write tools REMAIN ENABLED.`);
             }
 
+            // Reasoning models (Qwen3, QwQ, R1 …) consume output tokens for
+            // their chain-of-thought before emitting the final answer. With
+            // `reasoning_format: 'hidden'` the CoT is dropped from the
+            // response but it still counts against max_tokens, so we need a
+            // larger budget. 3000 is comfortable — ~2500 for CoT + ~500 for
+            // the Arabic reply. Non-reasoning models keep the tight 450.
+            const reasoning = this._reasoningParamsFor(activeModel);
+            const usingReasoning = Object.keys(reasoning).length > 0;
+
             const llmParams = {
                 model: activeModel,
                 tools: activeTools,
                 tool_choice: 'auto',
-                max_tokens: 450,  // Reduced — saves TPD quota (100k/day limit)
-                temperature: 0.2,
+                max_tokens: usingReasoning ? 3000 : 450,
+                temperature: usingReasoning ? 0.6 : 0.2, // Qwen3 docs recommend 0.6 when reasoning is on
+                ...reasoning,
             };
+
+            if (usingReasoning) {
+                logger.info(`🧠 Reasoning enabled (${activeModel}) — effort=${reasoning.reasoning_effort} format=hidden max_tokens=${llmParams.max_tokens}`);
+            }
 
             // ── First LLM call ──────────────────────────────────────
             let response = await this._callGroq({ ...llmParams, messages }, abortController.signal);
@@ -648,11 +706,15 @@ class GeminiService {
 
                 let llm2Failed = false;
                 try {
-                    // LLM2 only formats tool results → needs fewer tokens → faster
-                    // Use pruned tool list to prevent re-calling already-used read tools
+                    // LLM2 only formats tool results → needs fewer tokens → faster.
+                    // But reasoning models spend most of their output budget on the
+                    // chain-of-thought; if max_tokens is too small the final reply
+                    // is truncated or empty. Keep 350 for non-reasoning models,
+                    // lift to 2000 when a reasoning model is active.
+                    const llm2MaxTokens = usingReasoning ? 2000 : 350;
                     const llm2Params = {
                         ...llmParams,
-                        max_tokens: 350,
+                        max_tokens: llm2MaxTokens,
                         tools: llm2Tools.length > 0 ? llm2Tools : undefined,
                         tool_choice: llm2Tools.length > 0 ? 'auto' : undefined,
                     };
