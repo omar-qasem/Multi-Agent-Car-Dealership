@@ -202,14 +202,31 @@ const TIMEOUTS = {
 // Background dispatch — fires the Netlify Background Function and
 // returns as soon as Netlify acknowledges (typically <300 ms).
 //
-// Enabled by default on Netlify (`process.env.NETLIFY === 'true'`) so
-// production always uses the unlimited path. Disable explicitly by
-// setting `BACKGROUND_PROCESSING=false` for debugging / local tests.
+// Enabled by default in any Netlify/Lambda runtime. Disable explicitly
+// by setting `BACKGROUND_PROCESSING=false` for debugging / local tests.
+//
+// IMPORTANT: evaluate LAZILY (per request). process.env.NETLIFY is set
+// by netlify/functions/api.js AFTER this module is required, so a
+// module-load-time check would always see `undefined` and silently
+// fall through to the sync path. That was the bug in the first cut of
+// this refactor (prod log 2026-04-22 15:39 UTC).
 // ─────────────────────────────────────────────────────────────────────
-const BACKGROUND_ENABLED =
-    (process.env.BACKGROUND_PROCESSING ?? 'auto').toLowerCase() === 'false'
-        ? false
-        : !!process.env.NETLIFY;
+function isBackgroundEnabled() {
+    const flag = (process.env.BACKGROUND_PROCESSING ?? 'auto').toLowerCase();
+    if (flag === 'false' || flag === '0' || flag === 'off') return false;
+    if (flag === 'true'  || flag === '1' || flag === 'on')  return true;
+    // 'auto' — detect any Netlify / AWS Lambda runtime signal. We check
+    // multiple env vars so the flip is robust against Netlify renaming
+    // one of them, and so it also works in Netlify's CLI dev env.
+    return !!(
+        process.env.NETLIFY
+        || process.env.NETLIFY_DEV
+        || process.env.AWS_LAMBDA_FUNCTION_NAME
+        || process.env.LAMBDA_TASK_ROOT
+        || process.env.DEPLOY_URL
+        || process.env.URL
+    );
+}
 
 function buildBackgroundUrl(req) {
     // Netlify injects one of URL / DEPLOY_PRIME_URL / DEPLOY_URL into the
@@ -366,7 +383,15 @@ router.post('/', verifyMetaSignature, async (req, res) => {
         // few more seconds. Fix: hand the work off to a Background Function
         // (15-minute cap), respond 200 to Meta immediately.
         // ─────────────────────────────────────────────────────────────
-        if (BACKGROUND_ENABLED) {
+        const bgEnabled = isBackgroundEnabled();
+        // Trace which path we chose so production logs make the decision
+        // explicit — no more guessing whether the deploy picked it up.
+        reqLog.info('webhook: dispatch decision', {
+            background_enabled: bgEnabled,
+            netlify: !!process.env.NETLIFY,
+            background_processing_env: process.env.BACKGROUND_PROCESSING ?? null,
+        });
+        if (bgEnabled) {
             // Fire-and-await-lightly: only the enqueue handshake (~100-300 ms)
             // is awaited. The background function itself runs independently
             // for up to 15 minutes.

@@ -7,10 +7,14 @@
  * /health  → Health check
  */
 
+// IMPORTANT: set NETLIFY before requiring server/app so any module that
+// reads process.env at load time (webhook.routes.js, etc.) sees it. The
+// earlier placement (after require) caused the Background Function
+// dispatch to silently fall back to sync mode — see prod log 2026-04-22.
+process.env.NETLIFY = 'true';
+
 const serverless = require('serverless-http');
 const app = require('../../server/app');
-
-process.env.NETLIFY = 'true';
 
 // إعداد serverless-http مع معالجة المسار
 /**
