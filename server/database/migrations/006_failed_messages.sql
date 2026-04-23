@@ -26,10 +26,20 @@ CREATE INDEX IF NOT EXISTS idx_failed_messages_resolved
 
 -- RLS: service role can read/write; anon cannot.
 ALTER TABLE failed_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE failed_messages FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY IF NOT EXISTS "service_role_all"
-    ON failed_messages
-    FOR ALL
-    TO service_role
-    USING (true)
-    WITH CHECK (true);
+-- CREATE POLICY IF NOT EXISTS is PG 15+ only; use DO block for compatibility
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE tablename = 'failed_messages' AND policyname = 'service_role_all'
+    ) THEN
+        CREATE POLICY "service_role_all"
+            ON failed_messages
+            FOR ALL
+            TO service_role
+            USING (true)
+            WITH CHECK (true);
+    END IF;
+END$$;

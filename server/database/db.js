@@ -247,7 +247,8 @@ async function searchCars(filters = {}) {
     if (filters.min_price) q = q.gte('price', filters.min_price);
     if (filters.max_price) q = q.lte('price', filters.max_price);
     if (filters.branch)    q = q.ilike('branch', `%${filters.branch}%`);
-    if (filters.fuel_type) q = q.ilike('fuel_type', `%${filters.fuel_type}%`);
+    if (filters.fuel_type)    q = q.ilike('fuel_type',    `%${filters.fuel_type}%`);
+    if (filters.transmission) q = q.ilike('transmission', `%${filters.transmission}%`);
     const { data, error } = await q.limit(maxResults);
     if (error) sbThrow('searchCars', error);
     return data || [];
@@ -260,7 +261,8 @@ async function searchCars(filters = {}) {
   if (filters.min_price) results = results.filter(c => c.price >= filters.min_price);
   if (filters.max_price) results = results.filter(c => c.price <= filters.max_price);
   if (filters.branch)    results = results.filter(c => (c.branch || '').includes(filters.branch));
-  if (filters.fuel_type) results = results.filter(c => (c.fuel_type || '').includes(filters.fuel_type));
+  if (filters.fuel_type)    results = results.filter(c => (c.fuel_type    || '').toLowerCase().includes(filters.fuel_type.toLowerCase()));
+  if (filters.transmission) results = results.filter(c => (c.transmission || '').toLowerCase().includes(filters.transmission.toLowerCase()));
   return results.slice(0, maxResults);
 }
 
@@ -332,7 +334,12 @@ async function deleteCar(id) {
 async function searchParts(filters = {}) {
   if (useSupabase) {
     let q = supabase.from('parts').select('*');
-    if (filters.name) q = q.or(`name.ilike.%${filters.name}%,category.ilike.%${filters.name}%`);
+    if (filters.name) {
+      // Strip PostgREST reserved chars (., comma, parens, backslash) to prevent filter injection.
+      // Input comes from LLM args but still applies defence-in-depth.
+      const safeName = String(filters.name).replace(/[.,()\\]/g, '');
+      q = q.or(`name.ilike.%${safeName}%,category.ilike.%${safeName}%`);
+    }
     if (filters.part_number) q = q.ilike('part_number', `%${filters.part_number}%`);
     const { data, error } = await q.limit(6);
     if (error) sbThrow('searchParts', error);
@@ -952,7 +959,7 @@ async function getGroupedConversations(limit = 50) {
   if (useSupabase) {
     const { data, error } = await supabase
       .from('messages')
-      .select('phone_number, customer_name, created_at, message, direction, ai_response')
+      .select('phone_number, customer_name, created_at, customer_message, ai_response')
       .order('created_at', { ascending: false })
       .limit(500);
     if (error) sbThrow('getGroupedConversations', error);

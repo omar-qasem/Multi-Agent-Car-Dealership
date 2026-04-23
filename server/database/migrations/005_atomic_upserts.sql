@@ -21,7 +21,7 @@ END$$;
 
 -- 2. Atomic loyalty-point increment
 --    CREATE OR REPLACE is idempotent — safe to re-run.
-CREATE OR REPLACE FUNCTION increment_loyalty_points(p_customer_id BIGINT, p_points INT)
+CREATE OR REPLACE FUNCTION increment_loyalty_points(p_customer_id UUID, p_points INT)
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER

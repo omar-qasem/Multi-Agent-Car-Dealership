@@ -71,8 +71,6 @@ const PROMPT_FALLBACK = [PROMPT_PERSONA, PROMPT_RULES, PROMPT_DOMAIN].join('\n\n
 class GeminiService {
     constructor() {
         this.client = null;
-        this.conversationHistory = new Map();
-        this.conversationLastAccess = new Map();
         // Primary model: Qwen3-32B on Groq — reasoning-capable + full tool use.
         // We switched to Qwen3 for better agentic reasoning on complex Arabic
         // purchase / booking queries; the old llama-3.1-8b-instant produced
@@ -82,48 +80,17 @@ class GeminiService {
         // Fallback model: llama-3.3-70b-versatile — used when Qwen hits TPD
         // (tokens-per-day) limit or emits a connection error. No reasoning on
         // the fallback, but strong tool use.
-        this.model         = process.env.GROQ_MODEL          || 'qwen/qwen3-32b';
+        this.model         = process.env.GROQ_MODEL          || 'qwen-2.5-32b';
         this.fallbackModel = process.env.GROQ_FALLBACK_MODEL || 'llama-3.3-70b-versatile';
         // Track whether primary model's daily quota is exhausted this serverless instance.
         // Groq TPD resets at UTC midnight. We also record the UTC date we hit it so a
         // long-running process gives the primary model another chance the next day.
         this._primaryModelExhausted = false;
         this._exhaustedUtcDate = null; // 'YYYY-MM-DD' of when we hit TPD
-        this.maxHistory = 14;    // Last 7 turns — enough for full booking flow
-        this.maxToolCalls = 3;   // Hard cap on tool round-trips
-        this.MAX_CUSTOMERS = parseInt(process.env.MAX_CONVERSATION_CUSTOMERS) || 10000;
-        this.CONVERSATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
+        this.maxHistory    = 14;  // Last 7 turns — enough for full booking flow
+        this.maxToolCalls  = 3;   // Hard cap on tool round-trips
         this._initialize();
-        this._startCleanupTimer();
         this._loadPersistedFlags(); // async, non-blocking
-    }
-
-    _startCleanupTimer() {
-        if (process.env.NETLIFY) return; // No persistent process in serverless
-        this._cleanupInterval = setInterval(() => this._cleanupStale(), 60 * 60 * 1000);
-        if (this._cleanupInterval.unref) this._cleanupInterval.unref();
-    }
-
-    _cleanupStale() {
-        const now = Date.now();
-        let removed = 0;
-        for (const [phone, lastAccess] of this.conversationLastAccess.entries()) {
-            if (now - lastAccess > this.CONVERSATION_TTL_MS) {
-                this.conversationHistory.delete(phone);
-                this.conversationLastAccess.delete(phone);
-                removed++;
-            }
-        }
-        if (removed > 0) logger.info(`🧹 تم تنظيف ${removed} محادثة قديمة`);
-    }
-
-    _evictOldestIfFull() {
-        while (this.conversationHistory.size >= this.MAX_CUSTOMERS) {
-            const oldest = this.conversationHistory.keys().next().value;
-            if (oldest === undefined) break;
-            this.conversationHistory.delete(oldest);
-            this.conversationLastAccess.delete(oldest);
-        }
     }
 
     _initialize() {
@@ -366,6 +333,7 @@ class GeminiService {
             logger.warn(`⏱️ generateResponse: ${GLOBAL_BUDGET_MS}ms global budget exhausted — aborting Groq request`);
             abortController.abort();
         }, GLOBAL_BUDGET_MS);
+        let convState = null;
 
         try {
             // ── 0. Fast Intent Classifier (<1ms) ────────────────────
@@ -383,7 +351,6 @@ class GeminiService {
             ]);
 
             let history = [];
-            let convState = null;
             if (convStateResult.status === 'fulfilled' && convStateResult.value) {
                 convState = convStateResult.value;
                 if (convState.history && Array.isArray(convState.history)) {
@@ -872,8 +839,6 @@ class GeminiService {
     }
 
     async clearHistory(phoneNumber) {
-        this.conversationHistory.delete(phoneNumber);
-        this.conversationLastAccess.delete(phoneNumber);
         try {
             await db.clearConversationState(phoneNumber);
         } catch (e) {

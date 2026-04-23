@@ -234,15 +234,6 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
-      name: 'get_service_types',
-      description: 'عرض أنواع خدمات الصيانة المتاحة وأسعارها التقريبية. استدعها لما العميل يسأل "شو عندكم من خدمات" أو "بكم الصيانة".',
-      parameters: { type: 'object', properties: {} },
-    },
-  },
-
-  {
-    type: 'function',
-    function: {
       name: 'submit_support_ticket',
       description: 'إنشاء تذكرة دعم وتحويل العميل لموظف بشري. استدعها فور ما يطلب العميل موظف حقيقي، أو عند شكوى، أو طلب إلغاء/تعديل حجز، أو أي مشكلة لا يمكن حلها آلياً.',
       parameters: {
@@ -619,23 +610,6 @@ async function executeTool(toolName, args, customerPhone) {
           return { success: true, branch: branches[args.branch] };
         }
         return { success: true, branches: Object.values(branches) };
-      }
-
-      case 'get_service_types': {
-        return {
-          success: true,
-          services: [
-            { name: 'تغيير زيت + فلتر', price: '25-35 دينار', duration: '45 دقيقة' },
-            { name: 'صيانة دورية (10,000 كم)', price: '45-75 دينار', duration: '1.5-2 ساعة' },
-            { name: 'صيانة دورية (20,000 كم)', price: '80-120 دينار', duration: '2-3 ساعات' },
-            { name: 'فحص شامل 21 نقطة', price: 'مجاني مع كل صيانة', duration: '30 دقيقة' },
-            { name: 'تغيير إطارات', price: '8-12 دينار للإطار', duration: '30-45 دقيقة' },
-            { name: 'فحص وتصليح بريك', price: '35-85 دينار', duration: '1-2 ساعة' },
-            { name: 'فحص كهربائي', price: '20-50 دينار', duration: '30-90 دقيقة' },
-            { name: 'تعبئة غاز مكيف', price: '25-40 دينار', duration: '45 دقيقة' },
-            { name: 'سمكرة ودهان', price: 'حسب الحجم والضرر', duration: 'يوم - أسبوع' },
-          ],
-        };
       }
 
       case 'submit_support_ticket': {

@@ -127,6 +127,8 @@ async function _retrieveParts(e) {
     const searchParams = {};
     if (e.car_make)  searchParams.car_make = e.car_make;
     if (e.car_model) searchParams.car_model = e.car_model;
+    // Pass part name so results narrow to the specific part the customer asked about
+    if (e.part_name) searchParams.name = e.part_name;
 
     const parts = await db.searchParts(searchParams);
     if (!parts || parts.length === 0) return null;

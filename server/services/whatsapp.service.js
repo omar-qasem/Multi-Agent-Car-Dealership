@@ -129,23 +129,10 @@ class WhatsAppService {
    * the only place to update.
    */
   async sendTypingIndicator(to) {
-    if (!to) return;
-    const payload = {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to,
-      type: 'typing',
-    };
-    try {
-      await axios.post(this.baseUrl + '/messages', payload, {
-        headers: this.headers,
-        timeout: 3000,
-      });
-    } catch (error) {
-      // Typing indicator is best-effort — many Meta sandbox accounts don't
-      // support it. Log at warn level but never propagate the error.
-      logger.warn('sendTypingIndicator soft-fail', { to, err: error?.message });
-    }
+    // Typing indicators are not yet supported by the WhatsApp Cloud API.
+    // The previously used `type: 'typing'` payload results in a 400 Bad Request.
+    // Disabled to prevent log cluttering and wasted API calls.
+    return;
   }
 
   /**

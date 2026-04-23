@@ -11,6 +11,7 @@ const cookieParser = require('cookie-parser');
 const path = require('path');
 
 const config = require('./config/env');
+const pkg    = require('../package.json');
 const logger = require('./utils/logger');
 const {
     apiRateLimit,
@@ -122,7 +123,7 @@ app.get('/health', (req, res) => {
         name: 'أوتو جوردن - Auto Jordan',
         timestamp: new Date().toISOString(),
         uptime: typeof process !== 'undefined' ? process.uptime() : 0,
-        version: '6.1.0',
+        version: pkg.version,
     });
 });
 
@@ -185,7 +186,7 @@ app.get('/ready', async (req, res) => {
         status: allOk ? 'ready' : 'not-ready',
         timestamp: new Date().toISOString(),
         uptime: typeof process !== 'undefined' ? process.uptime() : 0,
-        version: '6.1.0',
+        version: pkg.version,
         checks: {
             supabase,
             groq,
