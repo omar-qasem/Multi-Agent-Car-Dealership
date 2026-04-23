@@ -10,61 +10,60 @@ const db = require('../database/db');
 const { classify } = require('./classifier');
 const { retrieveContext } = require('./rag.service');
 const { formatToolFallback } = require('../utils/response-templates');
+const { getFlowDirective, buildFlowContext, advanceFlowState } = require('./flow-engine');
 
 // =============================================
-// System Prompt — مختصر ومركّز للسرعة
+// System Prompt — Composable Sections
 // =============================================
-const SYSTEM_PROMPT = `أنت "أبو الزوز" 🚗 مساعد أوتو جوردن للسيارات — بلهجة أردنية ودية مختصرة.
+// Split into named constants so each section can be tested, updated, and
+// conditionally injected independently. FLOW_CONTEXT is injected at runtime
+// by the flow engine based on the current conversation state.
 
-**ممنوع:** تخمين أسعار، تأكيد حجز بدون booking_id، استدعاء أداة قبل جمع متطلباتها. **سؤال واحد فقط في كل رسالة.**
+const PROMPT_PERSONA = `أنت "أبو الزوز" 🚗 مساعد أوتو جوردن للسيارات.
+- تحكي بلهجة أردنية ودية ومختصرة
+- إيموجي خفيف فقط (🚗 🔧 ✅ 💰)
+- ردودك قصيرة وبدون مقدمات
+- **سؤال واحد فقط في كل رسالة**`;
 
-⚡ **قاعدة الأداء:** إذا وُجدت **بيانات من المخزون** أو **قطع غيار متوفرة** في السياق أدناه، اعتمد عليها مباشرةً — **لا تستدعِ search_cars أو check_parts_inventory مجدداً.** استدعِ الأداة فقط إذا لم تجد البيانات في السياق.
+const PROMPT_RULES = `**قواعد صارمة:**
+- ممنوع تخمين أسعار أو اختراع أرقام
+- ممنوع تأكيد حجز بدون booking_id حقيقي من الأداة
+- ممنوع استدعاء أداة كتابة (book_maintenance / submit_support_ticket / create_purchase_inquiry) قبل جمع كل حقولها
+- خطأ تقني → "واجهنا مشكلة بسيطة، اتصل 06-5000001"
+⚡ إذا وُجدت بيانات مخزون أو قطع في السياق → اعتمد عليها مباشرة ولا تستدعِ search_cars أو check_parts_inventory مجدداً`;
 
-## 📋 حجز الصيانة — 7 خطوات مرتبة:
-1. نوع الخدمة → اسأل إذا ما ذكره
-2. ماركة وموديل السيارة → اسأل إذا ما ذكرهم
-3. التاريخ → اسأل. حوّل أي تاريخ طبيعي (بكرا/الاثنين/15-4) إلى YYYY-MM-DD قبل الاستدعاء
-4. الفرع (عمان/إربد/الزرقاء/العقبة) → اسأل إذا ما ذكره
-5. استدعِ check_branch_availability(branch, date)
-   - is_available=false → أخبره الفرع مليء واقترح suggested_dates، اسأل عن تاريخ بديل
-   - is_available=true → انتقل لخطوة 6
-6. استدعِ book_maintenance بكل الحقول الخمسة
-   - needs_more_info=true → اسأل عن الحقل الناقص
-7. بعد booking_id → أكّد التفاصيل للعميل وأخبره بنتصل عليه
+const PROMPT_WORKFLOWS = `## 📋 حجز الصيانة:
+1. اجمع: نوع الخدمة، ماركة السيارة، الموديل، التاريخ (YYYY-MM-DD)، الفرع
+2. استدعِ check_branch_availability(branch, date) — إذا ممتلئ اقترح تواريخ بديلة
+3. اعرض الأوقات المتاحة واسأل العميل يختار
+4. استدعِ book_maintenance بكل الحقول — بعد booking_id أكّد للعميل
 
 ## 🚗 شراء سيارة:
-1. إذا وُجدت **بيانات من المخزون** في السياق → اعرضها مباشرة ولا تستدعِ search_cars. إذا لم توجد → استدعِ search_cars بالمواصفات المتوفرة (ماركة/ميزانية/نوع وقود/حالة...).
-2. اعرض النتائج للعميل
-3. إذا لم تُوجَد سيارات: أخبره ما في بهالمواصفات الآن، اقترح بدائل أو سجّل اهتمامه
-4. إذا أبدى اهتماماً جدياً → استدعِ create_purchase_inquiry (اسأل: تقسيط؟ عنده سيارة للبدل؟)
+- اعرض نتائج RAG مباشرة إذا موجودة، وإلا استدعِ search_cars
+- بعد إبداء اهتمام جدي → استدعِ create_purchase_inquiry (اسأل: تقسيط؟ سيارة للبدل؟)
 
-## 💰 تقسيط:
-قبل calculate_financing اجمع: سعر السيارة + الدفعة الأولى + المدة. إذا ما ذكر الدفعة اسأله، إذا ما ذكر المدة افترض 36 شهراً.
+## 💰 تقسيط: اجمع سعر + دفعة أولى + مدة (افتراضي 36 شهراً) قبل calculate_financing
 
-## 🔧 قطع الغيار:
-إذا ما ذكر العميل اسم القطعة → اسأله أولاً. ثم استدعِ check_parts_inventory(name, car_make?, car_model?).
-
-## 🔁 إلغاء/تعديل حجز أو شكوى:
-→ استدعِ submit_support_ticket(issue_description, category='booking_change'|'complaint') وأخبره بيتصل فيه موظف.
+## 🔧 قطع الغيار: اسأل عن اسم القطعة أولاً، ثم check_parts_inventory
 
 ## 📌 أدوات سريعة:
-- "هل عندكم X؟" أو "كم واحدة عندكم؟" → check_availability(make, model)
-- "قارن X وY" → compare_cars (استنتج الماركة إذا ذكر الموديل فقط)
-- مواعيدي السابقة → get_customer_bookings
-- عروض وتخفيضات → get_promotions
-- معلومات فرع → get_branch_info
-- يطلب موظف/شكوى → submit_support_ticket
+- توفر سيارة محددة → check_availability | مقارنة → compare_cars
+- حجوزاتي → get_customer_bookings | عروض → get_promotions | فرع → get_branch_info
+- شكوى/تعديل/موظف → submit_support_ticket`;
 
-## ردودك:
-- مختصرة، بدون مقدمات. إيموجي خفيف (🚗 🔧 ✅ 💰)
-- خطأ تقني → "واجهنا مشكلة بسيطة، اتصل 06-5000001"
-
-## معلومات أوتو جوردن:
-- 06-5000001 | عمان، شارع المدينة المنورة
+const PROMPT_DOMAIN = `## معلومات أوتو جوردن:
+- 📞 06-5000001 | عمان، شارع المدينة المنورة
 - 4 أفرع: عمان، إربد، الزرقاء، العقبة
-- ساعات: أسبوع 8ص-8م | جمعة 8ص-2م | سبت 8ص-6م
+- ⏰ أسبوع 8ص-8م | جمعة 8ص-2م | سبت 8ص-6م
 - ماركات: Toyota, Hyundai, Kia, MG, Chery, Nissan, BMW
 - دفع: كاش، بطاقة، تحويل، تقسيط حتى 60 شهر`;
+
+// Base prompt composed from sections — FLOW_CONTEXT injected at runtime
+const SYSTEM_PROMPT = [PROMPT_PERSONA, PROMPT_RULES, PROMPT_WORKFLOWS, PROMPT_DOMAIN].join('\n\n');
+
+// Shorter prompt for the fallback model (llama-3.3-70b) — omits the lengthy workflow
+// section that the weaker model doesn't need and that burns context tokens.
+const PROMPT_FALLBACK = [PROMPT_PERSONA, PROMPT_RULES, PROMPT_DOMAIN].join('\n\n');
 
 // =============================================
 // AI Service Class
@@ -96,6 +95,7 @@ class GeminiService {
         this.CONVERSATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
         this._initialize();
         this._startCleanupTimer();
+        this._loadPersistedFlags(); // async, non-blocking
     }
 
     _startCleanupTimer() {
@@ -138,6 +138,22 @@ class GeminiService {
         } catch (error) {
             logger.error('❌ خطأ في تهيئة Groq AI:', error);
         }
+    }
+
+    /**
+     * On cold start, restore the Groq TPD exhaustion flag from Supabase so
+     * a fresh Lambda instance doesn't re-hit the already-exhausted quota.
+     */
+    async _loadPersistedFlags() {
+        try {
+            const tpdDate = await db.getSystemFlag('groq_tpd_exhausted');
+            const today   = this._currentUtcDate();
+            if (tpdDate && tpdDate === today) {
+                this._primaryModelExhausted = true;
+                this._exhaustedUtcDate      = today;
+                logger.warn(`⚠️ Groq TPD flag restored from DB — primary model exhausted (${today}), using fallback: ${this.fallbackModel}`);
+            }
+        } catch { /* non-critical — worst case we hit TPD once on cold start */ }
     }
 
     /** UTC date helper used by the TPD-reset logic. */
@@ -195,6 +211,7 @@ class GeminiService {
             logger.info(`🔄 UTC day rolled over — resetting TPD flag, re-trying primary model (${this.model})`);
             this._primaryModelExhausted = false;
             this._exhaustedUtcDate = null;
+            db.setSystemFlag('groq_tpd_exhausted', '').catch(() => {});
         }
     }
 
@@ -246,7 +263,11 @@ class GeminiService {
                 const msg    = err?.message || '';
 
                 if (status === 429 && attempt < 2) {
-                    const isTPD = /tokens per day/i.test(msg);
+                    // Detect daily quota (TPD) via error code OR message string.
+                    // Groq returns error.code='rate_limit_exceeded' with type='tokens'
+                    // for both TPM and TPD; the 'day' substring distinguishes them.
+                    const isTPD = /tokens per day/i.test(msg)
+                        || (err?.error?.code === 'rate_limit_exceeded' && /day/i.test(msg));
 
                     if (isTPD) {
                         // Daily quota exhausted — waiting is futile (42+ min).
@@ -254,6 +275,8 @@ class GeminiService {
                         this._primaryModelExhausted = true;
                         this._exhaustedUtcDate = this._currentUtcDate();
                         logger.warn(`⚠️ Groq TPD exhausted for ${effectiveParams.model} — switching to fallback: ${this.fallbackModel} until UTC ${this._exhaustedUtcDate} rolls over`);
+                        // Persist across cold starts so fresh Lambda instances skip the primary
+                        db.setSystemFlag('groq_tpd_exhausted', this._exhaustedUtcDate).catch(() => {});
                         effectiveParams.model = this.fallbackModel;
                         // Retry immediately with new model (no sleep needed)
                         continue;
@@ -266,9 +289,12 @@ class GeminiService {
                     continue;
                 }
 
-                // Connection error — retry once immediately
-                if ((msg.toLowerCase().includes('connection') || msg.toLowerCase().includes('network')) && attempt < 2) {
-                    logger.warn(`⚠️ Groq connection error — retrying immediately`);
+                // Connection / 5xx errors — retry once with 500ms delay
+                const isTransient = (msg.toLowerCase().includes('connection') || msg.toLowerCase().includes('network'))
+                    || (status >= 500 && status <= 503);
+                if (isTransient && attempt < 2) {
+                    logger.warn(`⚠️ Groq transient error (${status || 'network'}) — retrying after 500ms`);
+                    await new Promise(r => setTimeout(r, 500));
                     continue;
                 }
 
@@ -286,6 +312,34 @@ class GeminiService {
         const mins = message.match(/try again in (\d+)m(\d+)s/);
         if (mins) return (parseInt(mins[1]) * 60 + parseInt(mins[2])) * 1000;
         return 2000;
+    }
+
+    /**
+     * Sanitize LLM output before sending to WhatsApp:
+     *   1. Strip <think>…</think> blocks (reasoning model leakage)
+     *   2. Strip bare JSON objects/arrays (tool result leakage)
+     *   3. Truncate to WhatsApp's 4096-char limit
+     * Returns null if nothing usable remains — caller falls back to template.
+     */
+    _sanitizeOutput(text) {
+        if (!text || typeof text !== 'string') return null;
+
+        // 1. Strip reasoning chain leakage
+        text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+        // 2. Strip responses that are purely JSON (tool result accidentally returned)
+        //    Heuristic: starts with { or [ and ends with } or ]
+        if (/^\s*[\[{][\s\S]*[\]}]\s*$/.test(text)) {
+            logger.warn('⚠️ sanitizeOutput: stripped raw JSON response from LLM');
+            return null;
+        }
+
+        // 3. Enforce WhatsApp 4096-char limit
+        if (text.length > 4096) {
+            text = text.substring(0, 4050) + '\n\n... للمزيد اتصل 06-5000001';
+        }
+
+        return text || null;
     }
 
     _formatToolFallback(toolName, toolResult) {
@@ -345,6 +399,34 @@ class GeminiService {
                 : {};
             const mergedEntities = { ...prevEntities, ...classification.entities };
 
+            // ── 30-min idle soft reset ──────────────────────────────
+            // After 30 minutes of inactivity, carry customer identity forward
+            // but clear the active flow and intent so the LLM starts fresh
+            // instead of resuming a stale mid-booking context.
+            const IDLE_RESET_MS = 30 * 60_000;
+            if (convState?.last_active) {
+                const idleMs = Date.now() - new Date(convState.last_active).getTime();
+                if (idleMs > IDLE_RESET_MS) {
+                    logger.info(`[MEMORY] Soft reset after ${Math.floor(idleMs / 60000)}min idle — clearing flow/intent for ${phoneNumber}`);
+                    convState = {
+                        ...convState,
+                        history:            (convState.history || []).slice(-2), // last exchange only
+                        flow_state:         null,
+                        pending_intent:     null,
+                        collected_entities: {},
+                    };
+                    history = (convState.history || []).slice();
+                }
+            }
+
+            // ── Flow engine directive ───────────────────────────────
+            // Must run before canned-response short-circuit so an in-progress
+            // booking flow is never silently abandoned by a canned reply.
+            const flowDirective = getFlowDirective(classification.intent, classification.entities, convState);
+            if (flowDirective.mode !== 'none') {
+                logger.info(`[FLOW] directive=${flowDirective.mode} collected=${JSON.stringify(flowDirective.flowState?.collected)}`);
+            }
+
             // ── Canned response short-circuit ───────────────────────
             if (classification.cannedResponse) {
                 history.push({ role: 'user', content: userMessage });
@@ -358,6 +440,8 @@ class GeminiService {
                             pending_intent:     convState?.pending_intent || null,
                             collected_entities: mergedEntities,
                             turn_count:         (convState?.turn_count || 0) + 1,
+                            flow_state:         convState?.flow_state || null,
+                            version:            convState?.version ?? null,
                         }),
                         new Promise((_, reject) =>
                             setTimeout(() => reject(new Error('saveConversationState: 2s timeout')), 2000)
@@ -383,12 +467,8 @@ class GeminiService {
             // ── Full LLM path ───────────────────────────────────────
             if (!this.client) {
                 clearTimeout(abortTimer);
-                return this._fallbackResponse(userMessage, startTime);
+                return this._fallbackResponse(userMessage, startTime, convState);
             }
-
-            this._evictOldestIfFull();
-            this.conversationHistory.set(phoneNumber, history);
-            this.conversationLastAccess.set(phoneNumber, Date.now());
 
             history.push({ role: 'user', content: userMessage });
             while (history.length > this.maxHistory) history.shift();
@@ -449,9 +529,18 @@ class GeminiService {
                 ? `\n\n⚠️ تنبيه مهم: قبل استدعاء book_maintenance أو create_purchase_inquiry أو submit_support_ticket، تأكد أنك جمعت كل الحقول المطلوبة من العميل (ماركة، موديل، خدمة، تاريخ، وقت، فرع). إذا ناقص حقل — اسأل العميل عنه أولاً، ولا تخترع قيم ولا تفترض.`
                 : '';
 
+            // Flow context sits between the static system prompt and RAG context
+            // so the LLM sees the booking state before any retrieved knowledge.
+            const flowContext = buildFlowContext(flowDirective);
+
+            // Use the shorter PROMPT_FALLBACK when on the fallback model to
+            // save tokens and keep it focused (the workflow section is mostly
+            // for the reasoning model's step-by-step planning).
+            const basePrompt = onFallback ? PROMPT_FALLBACK : SYSTEM_PROMPT;
+
             const systemNote = customerName
-                ? `${SYSTEM_PROMPT}${ragContext}${classifierHint}${fallbackReminder}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
-                : `${SYSTEM_PROMPT}${ragContext}${classifierHint}${fallbackReminder}\nرقم العميل: ${phoneNumber}`;
+                ? `${basePrompt}${flowContext}${ragContext}${classifierHint}${fallbackReminder}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
+                : `${basePrompt}${flowContext}${ragContext}${classifierHint}${fallbackReminder}\nرقم العميل: ${phoneNumber}`;
 
             const messages = [
                 { role: 'system', content: systemNote },
@@ -655,7 +744,18 @@ class GeminiService {
                 }
             }
 
-            const aiText = assistantMessage.content || 'عذراً، صار مشكلة. جرب مرة ثانية.';
+            const aiText = this._sanitizeOutput(assistantMessage.content) || 'عذراً، صار مشكلة. جرب مرة ثانية.';
+
+            // ── Advance flow state ──────────────────────────────────
+            // flowDirective.flowState has this turn's entity merges applied;
+            // advanceFlowState processes tool results and moves the step forward.
+            const baseFlowState = flowDirective.mode !== 'none' ? flowDirective.flowState : null;
+            const newFlowState = advanceFlowState(
+                baseFlowState,
+                classification.entities,
+                toolsUsed,
+                lastToolResults,
+            );
 
             // Save assistant reply to history.
             // We persist ONLY the final text-only assistant message, NOT the
@@ -691,6 +791,8 @@ class GeminiService {
                         pending_intent:     toolCompleted ? null : resolvedIntent,
                         collected_entities: toolCompleted ? {} : mergedEntities,
                         turn_count:         newTurnCount,
+                        flow_state:         newFlowState,
+                        version:            convState?.version ?? null,
                     }),
                     new Promise((_, reject) =>
                         setTimeout(() => reject(new Error('saveConversationState: 2s timeout')), 2000)
@@ -716,11 +818,28 @@ class GeminiService {
         } catch (error) {
             clearTimeout(abortTimer);
             logger.error('❌ AI Error:', error.message);
-            return this._fallbackResponse(userMessage, startTime);
+            return this._fallbackResponse(userMessage, startTime, convState);
         }
     }
 
-    _fallbackResponse(message, startTime) {
+    _fallbackResponse(message, startTime, convState = null) {
+        // If there's an active booking flow, tell the customer their data is safe
+        const flowState = convState?.flow_state;
+        if (flowState?.flow_id === 'booking' && flowState.step !== 'done' && flowState.collected) {
+            const c = flowState.collected;
+            const parts = [
+                c.service_type && `الخدمة: ${c.service_type}`,
+                c.car_make     && `السيارة: ${c.car_make}${c.car_model ? ' ' + c.car_model : ''}`,
+                c.date         && `التاريخ: ${c.date}`,
+                c.branch       && `الفرع: ${c.branch}`,
+            ].filter(Boolean).join('\n');
+            return {
+                response: `عذراً، تأخرنا شوي 🙏\nمعلوماتك محفوظة:\n${parts}\nبعت الرسالة مرة ثانية أو اتصل 06-5000001`,
+                responseTime: Date.now() - startTime,
+                toolsUsed: [], toolCallCount: 0, escalated: false, fromCache: false,
+            };
+        }
+
         const msg = (message || '').toLowerCase();
         let response;
 
@@ -762,8 +881,13 @@ class GeminiService {
         }
     }
 
-    getHistory(phoneNumber) {
-        return this.conversationHistory.get(phoneNumber) || [];
+    async getHistory(phoneNumber) {
+        try {
+            const state = await db.getConversationState(phoneNumber);
+            return state?.history || [];
+        } catch {
+            return [];
+        }
     }
 }
 

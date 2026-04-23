@@ -952,9 +952,9 @@ async function getGroupedConversations(limit = 50) {
   if (useSupabase) {
     const { data, error } = await supabase
       .from('messages')
-      .select('*')
+      .select('phone_number, customer_name, created_at, message, direction, ai_response')
       .order('created_at', { ascending: false })
-      .limit(2000);
+      .limit(500);
     if (error) sbThrow('getGroupedConversations', error);
     rows = data || [];
   } else {
@@ -977,6 +977,7 @@ async function getGroupedConversations(limit = 50) {
     const g = grouped.get(phone);
     g.messages.push(row);
     g.message_count++;
+    if (row.created_at > g.last_message) g.last_message = row.created_at;
   }
   // Sort messages inside each thread chronologically
   for (const g of grouped.values()) {
@@ -988,12 +989,26 @@ async function getGroupedConversations(limit = 50) {
 // =============================================
 // ANALYTICS & STATS
 // =============================================
+
+// 30-second TTL cache for getLiveStats — avoids hammering Supabase on
+// every dashboard refresh tick (the UI polls every ~10s).
+let _liveStatsCache   = null;
+let _liveStatsCacheAt = 0;
+const LIVE_STATS_TTL_MS = 30_000;
+
 async function getLiveStats() {
+  const now   = Date.now();
+  if (_liveStatsCache && now - _liveStatsCacheAt < LIVE_STATS_TTL_MS) {
+    return _liveStatsCache;
+  }
+
   const today = new Date().toISOString().split('T')[0];
+  // Only fetch bookings from the last 30 days — historical data doesn't affect live stats
+  const thirtyDaysAgo = new Date(now - 30 * 86_400_000).toISOString().split('T')[0];
 
   if (useSupabase) {
     const [bookingsRes, carsRes, partsRes, ticketsRes, inquiriesRes, customersRes, msgsRes] = await Promise.all([
-      supabase.from('bookings').select('status, preferred_date'),
+      supabase.from('bookings').select('status, preferred_date').gte('preferred_date', thirtyDaysAgo),
       supabase.from('cars').select('status'),
       supabase.from('parts').select('quantity, min_quantity'),
       supabase.from('support_tickets').select('status'),
@@ -1018,7 +1033,7 @@ async function getLiveStats() {
     const inquiries = inquiriesRes.data || [];
     const msgs      = msgsRes.data      || [];
 
-    return {
+    const result = {
       bookings_today:      bookings.filter(b => b.preferred_date === today && b.status !== 'cancelled').length,
       bookings_pending:    bookings.filter(b => b.status === 'pending').length,
       bookings_confirmed:  bookings.filter(b => b.status === 'confirmed').length,
@@ -1041,6 +1056,9 @@ async function getLiveStats() {
       conversations_today: msgs.length,
       updated_at:          new Date().toISOString(),
     };
+    _liveStatsCache   = result;
+    _liveStatsCacheAt = now;
+    return result;
   }
 
   // In-memory fallback
@@ -1214,6 +1232,12 @@ async function saveConversationState(phoneNumber, state) {
   if (!phoneNumber) return;
   if (!conversationStatesAvailable) return; // silently skip if table missing
 
+  // Optimistic locking: caller passes the version it loaded; we increment it.
+  // If the WHERE version = {loaded} matches 0 rows, a concurrent write happened
+  // and we reload + retry once rather than silently overwriting.
+  const loadedVersion = Number.isFinite(state.version) ? state.version : null;
+  const nextVersion   = (loadedVersion !== null ? loadedVersion : 0) + 1;
+
   const payload = {
     phone_number:       phoneNumber,
     history:            Array.isArray(state.history) ? state.history : [],
@@ -1221,13 +1245,45 @@ async function saveConversationState(phoneNumber, state) {
     collected_entities: state.collected_entities && typeof state.collected_entities === 'object' ? state.collected_entities : {},
     turn_count:         Number.isFinite(state.turn_count) ? state.turn_count : 0,
     last_active:        new Date().toISOString(),
+    version:            nextVersion,
   };
+  // flow_state is JSONB (migration 005). undefined = "caller didn't pass it" = keep existing.
+  if (state.flow_state !== undefined) payload.flow_state = state.flow_state || null;
 
   if (useSupabase) {
-    const { error } = await supabase
-      .from('conversation_states')
-      .upsert(payload, { onConflict: 'phone_number' });
-    if (error) sbThrow('saveConversationState', error);
+    if (loadedVersion !== null) {
+      // Update path — only touches the exact version we loaded
+      const { data, error } = await supabase
+        .from('conversation_states')
+        .update(payload)
+        .eq('phone_number', phoneNumber)
+        .eq('version', loadedVersion)
+        .select('version');
+      if (error) sbThrow('saveConversationState.update', error);
+
+      if (!data || data.length === 0) {
+        // Concurrent write detected — reload current version and retry once.
+        // Silent on second conflict: customer gets another chance next message.
+        const { data: fresh } = await supabase
+          .from('conversation_states')
+          .select('version')
+          .eq('phone_number', phoneNumber)
+          .maybeSingle();
+        if (fresh) {
+          await supabase
+            .from('conversation_states')
+            .update({ ...payload, version: (fresh.version || 0) + 1 })
+            .eq('phone_number', phoneNumber)
+            .eq('version', fresh.version || 0);
+        }
+      }
+    } else {
+      // New conversation — plain upsert (no prior version to match)
+      const { error } = await supabase
+        .from('conversation_states')
+        .upsert(payload, { onConflict: 'phone_number' });
+      if (error) sbThrow('saveConversationState.insert', error);
+    }
     return;
   }
 
@@ -1283,6 +1339,81 @@ async function saveFailedMessage(data) {
     console.warn('[DB] saveFailedMessage (in-memory):', payload);
   } catch (e) {
     console.error('[DB] saveFailedMessage threw (non-critical):', e?.message);
+  }
+}
+
+/**
+ * List unresolved failed messages for the admin dashboard (8.4).
+ */
+async function getFailedMessages(limit = 50) {
+  if (!useSupabase) return [];
+  const { data, error } = await supabase
+    .from('failed_messages')
+    .select('*')
+    .eq('resolved', false)
+    .order('created_at', { ascending: false })
+    .limit(Math.min(limit, 200));
+  if (error) { console.warn('[DB] getFailedMessages error:', error.message); return []; }
+  return data || [];
+}
+
+/**
+ * Count unresolved failed messages in the last N minutes (9.4 alerting).
+ */
+async function countRecentFailedMessages(minutes = 5) {
+  if (!useSupabase) return 0;
+  const since = new Date(Date.now() - minutes * 60_000).toISOString();
+  const { count, error } = await supabase
+    .from('failed_messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('resolved', false)
+    .gte('created_at', since);
+  if (error) { console.warn('[DB] countRecentFailedMessages error:', error.message); return 0; }
+  return count || 0;
+}
+
+/**
+ * Mark a failed message as resolved (admin manual action).
+ */
+async function resolveFailedMessage(id) {
+  if (!useSupabase) return;
+  const { error } = await supabase
+    .from('failed_messages')
+    .update({ resolved: true })
+    .eq('id', id);
+  if (error) sbThrow('resolveFailedMessage', error);
+}
+
+// =============================================
+// SYSTEM FLAGS (7.3 — persist Groq TPD flag across cold starts)
+// =============================================
+
+/**
+ * Read a key from system_flags. Returns null if key not found or table missing.
+ */
+async function getSystemFlag(key) {
+  if (!useSupabase) return null;
+  try {
+    const { data } = await supabase
+      .from('system_flags')
+      .select('value')
+      .eq('key', key)
+      .maybeSingle();
+    return data?.value ?? null;
+  } catch { return null; }
+}
+
+/**
+ * Upsert a key in system_flags. Fire-and-forget — never throws.
+ */
+async function setSystemFlag(key, value) {
+  if (!useSupabase) return;
+  try {
+    await supabase
+      .from('system_flags')
+      .upsert({ key, value: String(value), updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  } catch (e) {
+    console.warn(`[DB] setSystemFlag(${key}) failed:`, e?.message);
   }
 }
 
@@ -1350,6 +1481,12 @@ module.exports = {
   getActivePromotions,
   // Failed messages (dead-letter queue)
   saveFailedMessage,
+  getFailedMessages,
+  countRecentFailedMessages,
+  resolveFailedMessage,
+  // System flags (persistent KV across cold starts)
+  getSystemFlag,
+  setSystemFlag,
   // Legacy
   getDb,
   // Expose for health checks

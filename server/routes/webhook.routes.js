@@ -47,6 +47,14 @@ if (!VERIFY_TOKEN) {
     logger.error('❌ WHATSAPP_VERIFY_TOKEN not set — webhook verification will fail');
 }
 
+// Background function auth token — must be set in production to prevent
+// public-internet callers from invoking the background function directly.
+if (!process.env.BACKGROUND_FUNCTION_TOKEN) {
+    if (process.env.NODE_ENV === 'production' || process.env.NETLIFY) {
+        logger.warn('⚠️  BACKGROUND_FUNCTION_TOKEN not set — using static fallback "autojordan-internal". Set this in Netlify env vars.');
+    }
+}
+
 // P0-01: Meta App Secret must be configured in production so HMAC verification
 // can reject forged webhook POSTs. See middleware/webhookSignature.js.
 if (!process.env.WHATSAPP_APP_SECRET) {
@@ -305,7 +313,7 @@ router.post('/', verifyMetaSignature, async (req, res) => {
         const incoming = {
             messageId: message.id,
             from:      message.from,
-            timestamp: new Date(parseInt(message.timestamp) * 1000).toISOString(),
+            timestamp: (() => { const ms = parseInt(message.timestamp) * 1000; return Number.isFinite(ms) ? new Date(ms).toISOString() : new Date().toISOString(); })(),
             text,
             name:      contact?.profile?.name || message.from,
             log:       reqLog,   // thread correlation into downstream steps

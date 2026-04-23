@@ -39,7 +39,8 @@ function formatToolFallback(toolName, toolResult) {
             }
             case 'submit_support_ticket': {
                 const id = r.ticket_id || r.id;
-                return `✅ تم فتح تذكرة دعم${id ? ` رقم ${id}` : ''}!\nسيتواصل معك فريقنا قريباً 📱`;
+                const sla = r.sla || r.details?.sla || 'سيتواصل معك فريقنا قريباً 📱';
+                return `✅ تم فتح تذكرة دعم${id ? ` رقم ${id}` : ''}!\n${sla}`;
             }
             case 'create_purchase_inquiry': {
                 const id = r.inquiry_id || r.id;

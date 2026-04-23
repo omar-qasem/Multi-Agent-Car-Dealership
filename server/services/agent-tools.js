@@ -13,6 +13,32 @@ const {
 } = require('../utils/timeSlots');
 
 // =============================================
+// Ticket urgency detection
+// =============================================
+// Auto-classify ticket priority from issue text so emergencies don't wait
+// in the medium queue. Returns 'urgent'|'high'|null (null = use LLM value).
+function detectTicketUrgency(text) {
+  if (!text) return null;
+  const t = text.toLowerCase();
+  // Roadside / safety emergencies — respond within 15 minutes
+  if (/خرب|خراب|حادث|عطل|طريق|طوار[ئئ]|عاجل|مستعجل|breakdown|emergency|stuck|واقف|موقوف|مش شغال/.test(t)) {
+    return 'urgent';
+  }
+  // Complaints and significant issues — respond within 1 hour
+  if (/شكو[ىي]|مش راضي|مو راضي|غلط|غبن|حق[نا]+|ضمان|كفالة|مشكلة|complaint|wrong|cheated/.test(t)) {
+    return 'high';
+  }
+  return null;
+}
+
+const SLA_MESSAGES = {
+  urgent: 'سيتواصل معك فريقنا خلال 15 دقيقة 🔴',
+  high:   'سيتواصل معك فريقنا خلال ساعة 🟡',
+  medium: 'سيتواصل معك فريقنا خلال 24 ساعة 🟢',
+  low:    'سيتواصل معك فريقنا خلال 48 ساعة 🟢',
+};
+
+// =============================================
 // Staff notification helper
 // =============================================
 // Sends a WhatsApp message to STAFF_NOTIFICATION_PHONE when a booking or
@@ -457,8 +483,16 @@ async function executeTool(toolName, args, customerPhone) {
         if (!args.car_make     || String(args.car_make).trim()     === '') missing.push('ماركة السيارة (مثلاً: Toyota)');
         if (!args.car_model    || String(args.car_model).trim()    === '') missing.push('موديل السيارة (مثلاً: Camry)');
         if (!args.service_type || String(args.service_type).trim()=== '') missing.push('نوع الخدمة (مثلاً: تغيير زيت)');
-        if (!args.preferred_date|| String(args.preferred_date).trim()===''|| !/^\d{4}-\d{2}-\d{2}$/.test(args.preferred_date)) {
+        if (!args.preferred_date || String(args.preferred_date).trim() === '' || !/^\d{4}-\d{2}-\d{2}$/.test(args.preferred_date)) {
           missing.push('التاريخ بصيغة YYYY-MM-DD');
+        } else {
+          // Reject past dates — "أمس" or any date before today Jordan time (UTC+3)
+          const today = new Date();
+          today.setUTCHours(today.getUTCHours() + 3); // shift to UTC+3
+          const todayStr = today.toISOString().split('T')[0];
+          if (args.preferred_date < todayStr) {
+            missing.push(`التاريخ (${args.preferred_date} في الماضي — يجب أن يكون من اليوم ${todayStr} فأكثر)`);
+          }
         }
         if (!args.preferred_time || String(args.preferred_time).trim() === '') {
           missing.push('الوقت المفضل (مثلاً: 9:00 ص)');
@@ -606,6 +640,12 @@ async function executeTool(toolName, args, customerPhone) {
 
       case 'submit_support_ticket': {
         const customerName = args.customer_name || `عميل ${customerPhone.slice(-4)}`;
+
+        // Auto-detect urgency from issue text so emergencies aren't waiting 24h.
+        // LLM-provided priority is used only when no urgency keywords are found.
+        const urgencyPriority = detectTicketUrgency(args.issue_description || '');
+        const finalPriority = urgencyPriority || args.priority || 'medium';
+
         try {
           await withWriteRetry('upsertCustomer', () => db.upsertCustomer(customerPhone, { name: customerName }));
         } catch (e) {
@@ -617,22 +657,25 @@ async function executeTool(toolName, args, customerPhone) {
           customer_name:     customerName,
           issue_description: args.issue_description,
           category:          args.category || 'general',
-          priority:          args.priority || 'medium',
+          priority:          finalPriority,
         }));
 
-        // Notify staff about the new ticket (fire-and-forget).
+        const slaMsg = SLA_MESSAGES[ticket.priority] || SLA_MESSAGES.medium;
+        const priorityEmoji = { urgent: '🔴 عاجل', high: '🟡 مرتفع', medium: '🟢 متوسط', low: '🟢 عادي' }[ticket.priority] || '';
+
+        // Notify staff with priority flag (fire-and-forget).
         notifyStaff(
-          `🎫 تذكرة دعم جديدة #${ticket.id}\n` +
+          `🎫 تذكرة دعم جديدة #${ticket.id} — ${priorityEmoji}\n` +
           `👤 ${customerName} | 📱 ${customerPhone}\n` +
-          `📋 ${args.issue_description?.substring(0, 100) || ''}\n` +
-          `⚡ الأولوية: ${ticket.priority}`
+          `📋 ${args.issue_description?.substring(0, 100) || ''}`
         );
 
         return {
           success: true,
           ticket_id: ticket.id,
-          message: 'تم إنشاء التذكرة بنجاح. سيتواصل معك أحد موظفينا خلال ساعة.',
-          details: { ticket_id: ticket.id, priority: ticket.priority },
+          priority: ticket.priority,
+          message: `تم فتح تذكرة دعم رقم ${ticket.id} ✅\n${slaMsg}\nرقم الدعم: 06-5000001`,
+          details: { ticket_id: ticket.id, priority: ticket.priority, sla: slaMsg },
         };
       }
 

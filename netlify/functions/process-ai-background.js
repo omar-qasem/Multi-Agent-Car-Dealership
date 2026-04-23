@@ -108,19 +108,24 @@ exports.handler = async (event) => {
             { timeoutMs: 5000, log, trace });
         customer = customerStep.ok ? customerStep.result : null;
 
-        // ── 3. AI — unlimited mode. No step timeout on this one.
-        //       The function itself caps at 15 min; Groq will either
-        //       finish or surface a real error before then.
-        const aiStep = await step('bg.ai.generateResponse',
+        // ── 3. AI — unlimited mode. Retry once on failure before giving up.
+        let aiStep = await step('bg.ai.generateResponse',
             () => geminiService.generateResponse(from, text, name, { unlimited: true }),
             { log, trace }
         );
 
         if (!aiStep.ok) {
-            // generateResponse has its own catch — this only fires if something
-            // truly exotic (module load failure, etc.) blew up. Fall through to
-            // the outer catch so we send the customer a friendly fallback.
-            throw aiStep.error || new Error('generateResponse returned !ok');
+            log.warn('bg: AI first attempt failed — retrying in 2s', { err: aiStep.error?.message });
+            await new Promise(r => setTimeout(r, 2000));
+            aiStep = await step('bg.ai.generateResponse.retry',
+                () => geminiService.generateResponse(from, text, name, { unlimited: true }),
+                { log, trace }
+            );
+        }
+
+        if (!aiStep.ok) {
+            // Both attempts failed — fall through to outer catch for dead-letter + alert.
+            throw aiStep.error || new Error('generateResponse failed after retry');
         }
 
         const aiResult = aiStep.result;
@@ -229,6 +234,18 @@ exports.handler = async (event) => {
                 customer_message: text,
                 error_kind:       errKind,
                 error_message:    error?.message,
+            }).catch(() => {});
+        }
+
+        // Alert admin if 3+ failures in the last 5 minutes (9.4).
+        if (typeof db.countRecentFailedMessages === 'function' && process.env.STAFF_NOTIFICATION_PHONE) {
+            db.countRecentFailedMessages(5).then(count => {
+                if (count >= 3) {
+                    const alertMsg = `⚠️ تنبيه نظام: ${count} رسائل فاشلة في آخر 5 دقائق — راجع اللوقات والـ dashboard`;
+                    whatsappService.sendTextMessage(process.env.STAFF_NOTIFICATION_PHONE, alertMsg)
+                        .catch(() => {});
+                    log.warn('bg: admin alert sent — high failure rate', { count });
+                }
             }).catch(() => {});
         }
 

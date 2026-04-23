@@ -11,6 +11,7 @@ const router  = express.Router();
 const { authenticateToken } = require('../middleware/auth');
 const metrics = require('../utils/metrics');
 const logger  = require('../utils/logger');
+const db      = require('../database/db');
 
 /**
  * GET /api/admin/metrics
@@ -27,6 +28,39 @@ router.get('/metrics', authenticateToken, (req, res) => {
         res.json({ success: true, ...snap });
     } catch (err) {
         logger.error('admin.metrics: snapshot failed', { err });
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+/**
+ * GET /api/admin/failed-messages
+ * List unresolved dead-letter messages for manual review (8.4).
+ */
+router.get('/failed-messages', authenticateToken, async (req, res) => {
+    try {
+        const limit    = Math.min(parseInt(req.query.limit) || 50, 200);
+        const messages = await db.getFailedMessages(limit);
+        res.json({ success: true, messages, count: messages.length });
+    } catch (err) {
+        logger.error('admin.failed-messages: query failed', { err });
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/failed-messages/:id/resolve
+ * Mark a failed message as resolved (admin acknowledges it).
+ */
+router.post('/failed-messages/:id/resolve', authenticateToken, async (req, res) => {
+    try {
+        const id = parseInt(req.params.id, 10);
+        if (!Number.isFinite(id) || id <= 0) {
+            return res.status(400).json({ success: false, message: 'invalid id' });
+        }
+        await db.resolveFailedMessage(id);
+        res.json({ success: true, message: `Message ${id} marked as resolved` });
+    } catch (err) {
+        logger.error('admin.failed-messages.resolve: failed', { err });
         res.status(500).json({ success: false, message: err.message });
     }
 });
