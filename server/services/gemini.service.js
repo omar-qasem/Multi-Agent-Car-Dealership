@@ -80,7 +80,7 @@ class GeminiService {
         // Fallback model: llama-3.3-70b-versatile — used when Qwen hits TPD
         // (tokens-per-day) limit or emits a connection error. No reasoning on
         // the fallback, but strong tool use.
-        this.model         = process.env.GROQ_MODEL          || 'qwen-2.5-32b';
+        this.model         = process.env.GROQ_MODEL          || 'qwen/qwen3-32b';
         this.fallbackModel = process.env.GROQ_FALLBACK_MODEL || 'llama-3.3-70b-versatile';
         // Track whether primary model's daily quota is exhausted this serverless instance.
         // Groq TPD resets at UTC midnight. We also record the UTC date we hit it so a
