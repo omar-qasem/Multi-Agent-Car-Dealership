@@ -229,6 +229,15 @@ class GeminiService {
                 const status = err?.status || err?.statusCode;
                 const msg    = err?.message || '';
 
+                // 400 model_decommissioned — the GROQ_MODEL env var points to a
+                // retired model. Override to the hardcoded safe default and retry.
+                if (status === 400 && err?.error?.code === 'model_decommissioned' && attempt < 2) {
+                    const deadModel = effectiveParams.model;
+                    effectiveParams.model = 'qwen/qwen3-32b';
+                    logger.warn(`⚠️ Groq model decommissioned: ${deadModel} — auto-switching to qwen/qwen3-32b. Update GROQ_MODEL env var.`);
+                    continue;
+                }
+
                 if (status === 429 && attempt < 2) {
                     // Detect daily quota (TPD) via error code OR message string.
                     // Groq returns error.code='rate_limit_exceeded' with type='tokens'
