@@ -30,7 +30,8 @@ const PROMPT_RULES = `**قواعد صارمة:**
 - ممنوع تأكيد حجز بدون booking_id حقيقي من الأداة
 - ممنوع استدعاء أداة كتابة (book_maintenance / submit_support_ticket / create_purchase_inquiry) قبل جمع كل حقولها
 - خطأ تقني → "واجهنا مشكلة بسيطة، اتصل 06-5000001"
-⚡ إذا وُجدت بيانات مخزون أو قطع في السياق → اعتمد عليها مباشرة ولا تستدعِ search_cars أو check_parts_inventory مجدداً`;
+⚡ إذا وُجدت بيانات مخزون أو قطع في السياق → اعتمد عليها مباشرة ولا تستدعِ search_cars أو check_parts_inventory مجدداً
+🧠 ذاكرة العميل مرجعية فقط — إذا ذكر العميل سيارة أو فرعاً مختلفاً في رسالته الحالية، استخدم ما قاله الآن وتجاهل المحفوظ في الذاكرة لهذا الطلب`;
 
 const PROMPT_WORKFLOWS = `## 📋 حجز الصيانة:
 1. اجمع: نوع الخدمة، ماركة السيارة، الموديل، التاريخ (YYYY-MM-DD)، الفرع
@@ -40,7 +41,8 @@ const PROMPT_WORKFLOWS = `## 📋 حجز الصيانة:
 
 ## 🚗 شراء سيارة:
 - اعرض نتائج RAG مباشرة إذا موجودة، وإلا استدعِ search_cars
-- إذا العميل قال "بدي من فرع X" أو "بس من X" → استدعِ search_cars مع branch="X" — لا تستدعِ check_branch_availability (تلك للصيانة فقط)
+- إذا العميل في سياق شراء وقال "بدي من فرع X" → استدعِ search_cars مع branch="X"
+- ⚠️ أثناء حجز الصيانة، تغيير الفرع يعني استدعاء check_branch_availability بالفرع الجديد — لا search_cars
 - بعد إبداء اهتمام جدي → استدعِ create_purchase_inquiry (اسأل: تقسيط؟ سيارة للبدل؟)
 
 ## 💰 تقسيط: اجمع سعر + دفعة أولى + مدة (افتراضي 36 شهراً) قبل calculate_financing
@@ -587,9 +589,12 @@ class GeminiService {
             // Reasoning models (Qwen3, QwQ, R1 …) consume output tokens for
             // their chain-of-thought before emitting the final answer. With
             // `reasoning_format: 'hidden'` the CoT is dropped from the
-            // response but it still counts against max_tokens, so we need a
-            // larger budget. 3000 is comfortable — ~2500 for CoT + ~500 for
-            // the Arabic reply. Non-reasoning models keep the tight 450.
+            // response but it still counts against max_tokens.
+            //
+            // Budget: 1500 keeps total request (input ~4200 + output 1500)
+            // at ~5700 tokens — safely under Groq free-tier's 6K TPM limit
+            // for qwen/qwen3-32b, avoiding the 413 fallback entirely.
+            // Non-reasoning models keep the tight 450 (no CoT overhead).
             const reasoning = this._reasoningParamsFor(activeModel);
             const usingReasoning = Object.keys(reasoning).length > 0;
 
@@ -597,7 +602,7 @@ class GeminiService {
                 model: activeModel,
                 tools: activeTools,
                 tool_choice: 'auto',
-                max_tokens: usingReasoning ? 3000 : 450,
+                max_tokens: usingReasoning ? 1500 : 450,
                 temperature: usingReasoning ? 0.6 : 0.2, // Qwen3 docs recommend 0.6 when reasoning is on
                 ...reasoning,
             };
@@ -743,11 +748,9 @@ class GeminiService {
 
                 try {
                     // LLM2 only formats tool results → needs fewer tokens → faster.
-                    // But reasoning models spend most of their output budget on the
-                    // chain-of-thought; if max_tokens is too small the final reply
-                    // is truncated or empty. Keep 350 for non-reasoning models,
-                    // lift to 2000 when a reasoning model is active.
-                    const llm2MaxTokens = usingReasoning ? 2000 : 350;
+                    // Keep 350 for non-reasoning models; 1000 for reasoning models
+                    // (enough for CoT + Arabic reply, stays within 6K TPM budget).
+                    const llm2MaxTokens = usingReasoning ? 1000 : 350;
                     const llm2Params = {
                         ...llmParams,
                         max_tokens: llm2MaxTokens,
