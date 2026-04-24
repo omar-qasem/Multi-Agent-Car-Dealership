@@ -906,8 +906,8 @@ class GeminiService {
         // misclassifying "صيانة للسيارة" as a car purchase intent.
         if (msg.includes('هلا') || msg.includes('مرحبا') || msg.includes('السلام') || msg.includes('هاي') || msg.includes('اهلا')) {
             response = 'هلا والله! أهلين فيك بأوتو جوردن 🚗\nكيف بقدر أساعدك اليوم؟\n\n1️⃣ سيارات للبيع\n2️⃣ قطع غيار\n3️⃣ حجز صيانة\n4️⃣ عروض\n5️⃣ أحكي مع موظف';
-        } else if (msg.includes('صيانة') || msg.includes('موعد') || msg.includes('احجز') || msg.includes('حجز') || msg.includes('اصلح') || msg.includes('صلح') || msg.includes('تصليح') || msg.includes('سيرفس')) {
-            response = 'تكرم! 🔧 محتاج منك:\n• نوع الخدمة (صيانة / فرامل / مكيف...)\n• ماركة السيارة وموديلها\n• الفرع (عمان/إربد/الزرقاء/العقبة)\n\nاحكيلي وبحجزلك فوراً!';
+        } else if (msg.includes('صيانة') || msg.includes('موعد') || msg.includes('احجز') || msg.includes('حجز') || msg.includes('اصلح') || msg.includes('صلح') || msg.includes('تصليح') || msg.includes('سيرفس') || msg.includes('بنشر') || msg.includes('مبشر') || msg.includes('كوشوك') || msg.includes('عجل') || msg.includes('كفر')) {
+            response = 'تكرم! 🔧 محتاج منك:\n• نوع الخدمة (صيانة / فرامل / إطارات / بنشر...)\n• ماركة السيارة وموديلها\n• الفرع (عمان/إربد/الزرقاء/العقبة)\n\nاحكيلي وبحجزلك فوراً!';
         } else if (msg.includes('فرع') || msg.includes('فروع') || msg.includes('عنوان') || msg.includes('وين')) {
             response = 'عنا 4 أفرع 📍\n1️⃣ عمان - شارع المدينة المنورة\n2️⃣ إربد - شارع الجامعة\n3️⃣ الزرقاء - شارع الأمير محمد\n4️⃣ العقبة - شارع الملك الحسين\n\nتلفون: 06-5000001';
         } else if (msg.includes('قطع') || msg.includes('غيار') || msg.includes('سبير') || msg.includes('فلتر') || msg.includes('بطارية')) {
