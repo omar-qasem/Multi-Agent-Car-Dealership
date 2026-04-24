@@ -57,6 +57,18 @@ const CAR_MAKES = {
     'بي واي دي': 'BYD', 'byd': 'BYD',
     // Geely
     'جيلي': 'Geely', 'geely': 'Geely',
+    // Audi — very common in Jordan, not sold by dealer but serviced
+    'أودي': 'Audi', 'اودي': 'Audi', 'آودي': 'Audi', 'audi': 'Audi',
+    // Mercedes — same: common for service requests
+    'مرسيدس': 'Mercedes', 'مرسدس': 'Mercedes', 'mercedes': 'Mercedes',
+    // Honda
+    'هوندا': 'Honda', 'honda': 'Honda',
+    // Mitsubishi
+    'ميتسوبيشي': 'Mitsubishi', 'ميتسوبيشى': 'Mitsubishi', 'mitsubishi': 'Mitsubishi',
+    // Suzuki
+    'سوزوكي': 'Suzuki', 'suzuki': 'Suzuki',
+    // Volkswagen
+    'فولكسفاغن': 'Volkswagen', 'فولكس': 'Volkswagen', 'vw': 'Volkswagen',
 };
 
 // Two lists: Arabic models (substring-safe because they're long) and
@@ -121,6 +133,8 @@ const SERVICE_TYPES = {
     'ناقل حركة': 'ناقل حركة',
     'فيتة': 'حزام توقيت',
     'حزام توقيت': 'حزام توقيت',
+    'باكاكس': 'عادم',        // Jordanian slang for exhaust/backfire noise
+    'بكاكيس': 'عادم',
 };
 
 // Branch canonical names + common spelling variants (without hamza, with ب prefix, etc.)
@@ -245,7 +259,8 @@ const FAQ_PATTERNS = [
 // =============================================
 const INTENT_PATTERNS = {
     // Booking: explicit "احجز/حجز" OR repair/fix verbs OR service terms
-    booking:  /(?:بدي\s+(?:أحجز|احجز|حجز|اعمل\s+صيانة|أعمل\s+صيانة|اظلل|أظلل|ظلل|اعمل\s+بنشر|أعمل\s+بنشر)|حجز\s+(?:صيانة|موعد)|أحجز\s+موعد|بدي\s+(?:اصلح|أصلح|تصليح|تظليل)|اصلح\s+ال|تصليح\s+ال|تظليل\s+(?:سيارة|الشبابيك|شبابيك)|بنشر\s+(?:سيارة|العجل|الكفر)|العجل\s+مبشر|book|appointment)/i,
+    // Also catches breakdown descriptions: "سيارتي خربت/عطلت/واقفة" — customer needs service, not a purchase
+    booking:  /(?:بدي\s+(?:أحجز|احجز|حجز|اعمل\s+صيانة|أعمل\s+صيانة|اظلل|أظلل|ظلل|اعمل\s+بنشر|أعمل\s+بنشر)|حجز\s+(?:صيانة|موعد)|أحجز\s+موعد|بدي\s+(?:اصلح|أصلح|تصليح|تظليل)|اصلح\s+ال|تصليح\s+ال|تظليل\s+(?:سيارة|الشبابيك|شبابيك)|بنشر\s+(?:سيارة|العجل|الكفر)|العجل\s+مبشر|سيارت[يه]?\s+(?:خربت|عطلت|معطلة|واقفة|مشت)|(?:خربت|عطلت|معطلة)\s+(?:سيارت[يه]?|ال(?:سيارة|عربية))|book|appointment)/i,
     purchase: /(?:بدي\s+(?:أشتري|اشتري|سيارة\s+جديدة)|شو\s+عندكم\s+(?:سيارات|موديل)|أبغى\s+سيارة|buy\s+(?:a\s+)?car)/i,
     support:  /(?:بدي\s+(?:أحكي|احكي)\s+مع\s+(?:حدا|موظف|مدير)|شكوى|complaint|talk\s+to\s+(?:agent|human|manager))/i,
     parts:    /(?:قطعة|قطع\s+غيار|سبير|spare\s+part|بدي\s+(?:فلتر|بطارية|إطار|بريك))/i,

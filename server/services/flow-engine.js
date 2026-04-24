@@ -115,7 +115,8 @@ function buildFlowContext(directive) {
 ${summary}
 ⏳ الخطوة التالية: **${_fieldLabel(missing)}**
 تعليمات: ${FIELD_QUESTION_CONTEXT[missing]}
-⛔ لا تستدعِ أي أداة الآن — سؤال واحد فقط عن "${_fieldLabel(missing)}".`;
+⛔ لا تستدعِ أي أداة الآن — سؤال واحد فقط عن "${_fieldLabel(missing)}".
+⛔ لا تستدعِ search_cars — تلك لشراء سيارة جديدة، وليس للصيانة. السيارة التي يذكرها العميل هي سيارته الشخصية للصيانة.`;
     }
 
     if (directive.mode === 'awaiting_time') {

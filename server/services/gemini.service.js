@@ -706,7 +706,7 @@ class GeminiService {
                 model: activeModel,
                 tools: activeTools,
                 tool_choice: 'auto',
-                max_tokens: usingReasoning ? 1000 : 400,
+                max_tokens: usingReasoning ? 600 : 400,
                 temperature: usingReasoning ? 0.6 : 0.2, // Qwen3 docs recommend 0.6 when reasoning is on
                 ...reasoning,
             };
@@ -854,7 +854,7 @@ class GeminiService {
                     // LLM2 only formats tool results → needs fewer tokens → faster.
                     // Keep 350 for non-reasoning models; 1000 for reasoning models
                     // (enough for CoT + Arabic reply, stays within 6K TPM budget).
-                    const llm2MaxTokens = usingReasoning ? 1000 : 350;
+                    const llm2MaxTokens = usingReasoning ? 600 : 350;
                     const llm2Params = {
                         ...llmParams,
                         max_tokens: llm2MaxTokens,
