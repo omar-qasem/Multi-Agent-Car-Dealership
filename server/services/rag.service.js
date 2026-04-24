@@ -89,6 +89,7 @@ async function _retrieveCars(e) {
     if (e.budget)     searchParams.max_price = e.budget;
     if (e.fuel_type)  searchParams.fuel_type = e.fuel_type;
     if (e.condition)  searchParams.condition = e.condition;
+    if (e.branch)     searchParams.branch    = e.branch;
 
     const cars = await db.searchCars(searchParams);
     if (!cars || cars.length === 0) return null;

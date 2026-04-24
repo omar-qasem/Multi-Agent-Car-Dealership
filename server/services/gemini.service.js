@@ -40,6 +40,7 @@ const PROMPT_WORKFLOWS = `## 📋 حجز الصيانة:
 
 ## 🚗 شراء سيارة:
 - اعرض نتائج RAG مباشرة إذا موجودة، وإلا استدعِ search_cars
+- إذا العميل قال "بدي من فرع X" أو "بس من X" → استدعِ search_cars مع branch="X" — لا تستدعِ check_branch_availability (تلك للصيانة فقط)
 - بعد إبداء اهتمام جدي → استدعِ create_purchase_inquiry (اسأل: تقسيط؟ سيارة للبدل؟)
 
 ## 💰 تقسيط: اجمع سعر + دفعة أولى + مدة (افتراضي 36 شهراً) قبل calculate_financing
@@ -566,9 +567,13 @@ class GeminiService {
             // for the reasoning model's step-by-step planning).
             const basePrompt = onFallback ? PROMPT_FALLBACK : SYSTEM_PROMPT;
 
+            // Inject today's date so the model never invents stale dates from training data.
+            const todayStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+            const dateHint = `\n\n📅 تاريخ اليوم: ${todayStr} — استخدم هذا التاريخ كمرجع لأي حجز أو فحص توفر.`;
+
             const systemNote = customerName
-                ? `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
-                : `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}\nرقم العميل: ${phoneNumber}`;
+                ? `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}${dateHint}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
+                : `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}${dateHint}\nرقم العميل: ${phoneNumber}`;
 
             const messages = [
                 { role: 'system', content: systemNote },
