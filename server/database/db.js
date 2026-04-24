@@ -447,6 +447,25 @@ async function upsertCustomer(phone, data) {
   return updated;
 }
 
+/**
+ * Save persistent customer facts (car, branch preference, notes).
+ * Only writes fields that are truthy — never overwrites a known value with null.
+ * Called after every AI turn that extracted new entity data.
+ */
+async function updateCustomerProfile(phone, profile = {}) {
+  const allowed = ['car_make', 'car_model', 'car_year', 'preferred_branch', 'customer_notes'];
+  const patch = {};
+  for (const key of allowed) {
+    if (profile[key] != null && profile[key] !== '') patch[key] = profile[key];
+  }
+  if (Object.keys(patch).length === 0) return; // nothing new to save
+  try {
+    await upsertCustomer(phone, patch);
+  } catch (e) {
+    console.warn(`[DB] updateCustomerProfile failed (non-critical): ${e.message}`);
+  }
+}
+
 async function getOrCreateCustomer(phone, name) {
   const existing = await getCustomer(phone);
   if (existing) return existing;
@@ -1452,6 +1471,7 @@ module.exports = {
   // Customers
   getCustomer,
   upsertCustomer,
+  updateCustomerProfile,
   getOrCreateCustomer,
   updateCustomerLoyalty,
   // Bookings

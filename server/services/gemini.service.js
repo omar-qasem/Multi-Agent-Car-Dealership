@@ -349,10 +349,11 @@ class GeminiService {
             const classification = classify(userMessage);
             logger.info(`🏷️ Classifier: intent=${classification.intent} conf=${classification.confidence} entities=${JSON.stringify(classification.entities)}`);
 
-            // ── 1. PARALLEL: Load conv state + RAG pre-fetch ────────
-            // These are independent DB calls — run together to save ~1-2s.
-            const [convStateResult, ragResult] = await Promise.allSettled([
+            // ── 1. PARALLEL: Load conv state + customer profile + RAG ──
+            // All three are independent DB calls — run together to save ~2-3s.
+            const [convStateResult, customerResult, ragResult] = await Promise.allSettled([
                 db.getConversationState(phoneNumber),
+                db.getCustomer(phoneNumber),
                 // Only run RAG if we'll need LLM (skip for canned responses)
                 classification.cannedResponse
                     ? Promise.resolve(null)
@@ -367,6 +368,23 @@ class GeminiService {
                 }
             } else if (convStateResult.status === 'rejected') {
                 logger.warn(`⚠️ getConversationState failed (using empty history): ${convStateResult.reason?.message}`);
+            }
+
+            // ── Customer persistent memory ──────────────────────────
+            // Facts saved from previous conversations (car, branch, etc.)
+            // injected into every prompt so the AI never forgets the customer's car.
+            let customerMemory = '';
+            if (customerResult.status === 'fulfilled' && customerResult.value) {
+                const cp = customerResult.value;
+                const memParts = [];
+                if (cp.name)              memParts.push(`الاسم: ${cp.name}`);
+                if (cp.car_make)          memParts.push(`سيارته: ${cp.car_make}${cp.car_model ? ' ' + cp.car_model : ''}${cp.car_year ? ' ' + cp.car_year : ''}`);
+                if (cp.preferred_branch)  memParts.push(`فرعه المفضل: ${cp.preferred_branch}`);
+                if (cp.customer_notes)    memParts.push(`ملاحظات: ${cp.customer_notes}`);
+                if (memParts.length > 0) {
+                    customerMemory = `\n\n## ذاكرة العميل (من محادثات سابقة):\n${memParts.join('\n')}\nاستخدم هذه المعلومات مباشرة ولا تسأل العميل عنها إذا كانت موجودة.`;
+                    logger.info(`🧠 Customer memory loaded: ${memParts.join(' | ')}`);
+                }
             }
 
             // Merge classifier entities into conversation state
@@ -515,8 +533,8 @@ class GeminiService {
             const basePrompt = onFallback ? PROMPT_FALLBACK : SYSTEM_PROMPT;
 
             const systemNote = customerName
-                ? `${basePrompt}${flowContext}${ragContext}${classifierHint}${fallbackReminder}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
-                : `${basePrompt}${flowContext}${ragContext}${classifierHint}${fallbackReminder}\nرقم العميل: ${phoneNumber}`;
+                ? `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
+                : `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}\nرقم العميل: ${phoneNumber}`;
 
             const messages = [
                 { role: 'system', content: systemNote },
@@ -776,6 +794,18 @@ class GeminiService {
                 ]);
             } catch (e) {
                 logger.warn(`⚠️ saveConversationState failed (continuing): ${e.message}`);
+            }
+
+            // ── Persist new customer facts ──────────────────────────
+            // Map entity keys → customer profile columns and save anything new.
+            // Fire-and-forget — never block the response on this.
+            const profilePatch = {};
+            if (mergedEntities.car_make)    profilePatch.car_make        = mergedEntities.car_make;
+            if (mergedEntities.car_model)   profilePatch.car_model       = mergedEntities.car_model;
+            if (mergedEntities.car_year)    profilePatch.car_year        = mergedEntities.car_year;
+            if (mergedEntities.branch)      profilePatch.preferred_branch = mergedEntities.branch;
+            if (Object.keys(profilePatch).length > 0) {
+                db.updateCustomerProfile(phoneNumber, profilePatch).catch(() => {});
             }
 
             const responseTime = Date.now() - startTime;
