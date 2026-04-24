@@ -41,7 +41,8 @@ const SYSTEM_PROMPT = '# أبو الزوز — مساعد أوتو جوردن �
 '6. **ذاكرة العميل مرجعية فقط** — ما يقوله في رسالته الحالية يأخذ الأولوية على الذاكرة\n' +
 '7. **ممنوع وصف استخدام الأداة للعميل** — لا تكتب "سأستخدم أداة X" أو "حسناً استخدم أداة Y" أو "ابحث عن..." — استدعِ الأداة مباشرةً بصمت\n' +
 '8. **ممنوع X أو [...] كمكان شاغر** — إذا ما عندك معلومة اسأل سؤالاً محدداً — لا تُرسل رسالة ناقصة تحتوي X أو [اسم] أو مكان شاغر\n' +
-'9. **compare_cars** — استخدم الماركة والموديل اللي ذكرهم العميل فقط — لا تخترع موديلات من عندك\n\n' +
+'9. **compare_cars** — استخدم الماركة والموديل اللي ذكرهم العميل فقط — لا تخترع موديلات من عندك\n' +
+'10. **"احجزلي"/"اخذها"/"اقصطها" في سياق الشراء** — إذا كان pending_intent=purchase أو عرضت نتائج search_cars وطلب العميل الشراء/الحجز → استدعِ create_purchase_inquiry، وليس book_maintenance (الذي هو لصيانة السيارات فقط)\n\n' +
 '---\n\n' +
 '## 🔧 حجز الصيانة:\n\n' +
 '**خدمات مقبولة:** صيانة دورية، تغيير زيت، فرامل/بريك، مكيف، كهرباء، إطارات/كوشوك، بنشر/مبشر، سمكرة ودهان، تظليل شبابيك، بطارية، تبديل زجاج، فحص شامل، برمجة، ناقل حركة، حزام توقيت، عادم\n\n' +
@@ -621,6 +622,20 @@ class GeminiService {
                     }
                 }
 
+                // Affirmation: explicit signal that customer is saying "yes" to prior question.
+                // Tell the LLM what context to interpret this against so it doesn't default
+                // to a generic greeting or switch to a different flow (e.g. maintenance).
+                if (classification.intent === 'affirmation') {
+                    classifierHint += `\n- ⚡ "${userMessage.trim()}" = موافقة/تأكيد إيجابي على آخر سؤال/عرض قدمته`;
+                    if (pendingIntent === 'purchase') {
+                        classifierHint += ` — السياق: شراء سيارة. إذا أكد اهتمامه بسيارة → استدعِ create_purchase_inquiry (مش book_maintenance)`;
+                    } else if (pendingIntent === 'booking') {
+                        classifierHint += ` — السياق: حجز صيانة. استمر في جمع بيانات الحجز`;
+                    } else {
+                        classifierHint += ` — راجع تاريخ المحادثة لتفهم ماذا كان سؤالك السابق`;
+                    }
+                }
+
                 if (hasEntities) {
                     classifierHint += `\n- الكيانات المستخرجة (تراكمي): ${JSON.stringify(mergedEntities)}`;
                     classifierHint += `\n- استخدم هذه الكيانات مباشرة عند استدعاء الأدوات — لا تسأل المستخدم عنها مرة ثانية.`;
@@ -913,20 +928,29 @@ class GeminiService {
             ]);
             const toolCompleted = toolsUsed.some(t => completedTools.has(t));
 
-            // Resolve pending_intent: if classifier found one, use it;
-            // otherwise carry forward from conversation state (multi-turn).
-            const resolvedIntent = classification.intent !== 'unknown'
+            // Resolve pending_intent: if classifier found a real intent, use it.
+            // 'unknown' and 'affirmation' both inherit the prior pending_intent —
+            // neither represents a new topic that should overwrite conversation context.
+            const isContextual = classification.intent === 'unknown' || classification.intent === 'affirmation';
+            const resolvedIntent = !isContextual
                 ? classification.intent
                 : (convState?.pending_intent || null);
 
             const newTurnCount = (convState?.turn_count || 0) + 1;
+
+            // When this turn ran search_cars, the customer is explicitly in purchase
+            // mode — force pending_intent='purchase' regardless of what the classifier
+            // said. This survives race conditions where a concurrent short message (like
+            // "اه") would otherwise inherit a null/stale pending_intent from the DB.
+            const effectiveIntent = toolsUsed.includes('search_cars') ? 'purchase' : resolvedIntent;
+
             try {
                 // Hard 2s timeout — if conversation_states table is missing or DB is slow,
                 // we must NOT let this hang for 10-12s and cause the Netlify step timeout.
                 await Promise.race([
                     db.saveConversationState(phoneNumber, {
                         history,
-                        pending_intent:     toolCompleted ? null : resolvedIntent,
+                        pending_intent:     toolCompleted ? null : effectiveIntent,
                         collected_entities: toolCompleted ? {} : mergedEntities,
                         turn_count:         newTurnCount,
                         flow_state:         newFlowState,

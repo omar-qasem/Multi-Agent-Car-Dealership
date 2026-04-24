@@ -183,6 +183,12 @@ const MENU_INTENT_MAP = {
 // Goodbye / thank-you patterns — canned farewell, no LLM needed.
 const GOODBYE_PATTERNS = /^(?:شكر[اً]?|يسلمو|يعطيك|باي|وداع|مع السلامة|تمام شكرا|ما بدي|ما بدي شي|تمام ما في شي|نزلت|عادي|موفق|يا سلام|ok bye|bye|thanks?|thank you)[\s!.،؟]*$/i;
 
+// Short affirmative responses — context-dependent "yes/ok" that must inherit
+// the conversation's pending_intent rather than being treated as a new topic.
+// Examples: "اه", "أيوه", "نعم", "أكيد", "تمام", "موافق", "ok", "yes"
+// These must NOT be classified as greetings or unknown.
+const AFFIRMATION_PATTERN = /^(?:اه|آه|أه|أيوه|ايوه|نعم|أكيد|اكيد|موافق|صح|تمام|يلا|طيب|ماشي|حلو|زين|مضبوط|يس|yes|ok|okay|sure|يوك|أيه|ايه|مم|أمم|هه|ها)[\s!.،؟🙂😊👍✅]*$/i;
+
 // Negation prefixes — if any of these appear right before an intent verb,
 // the intent should NOT fire. ("ما بدي احجز" must not be tagged as booking.)
 const NEGATION_REGEX = /\b(ما|مش|مو|لا)\s+/i;
@@ -521,6 +527,22 @@ function classify(text) {
     // message that also carries a real question or intent.
     const matchesAnyFaq = FAQ_PATTERNS.some(f => f.regex.test(norm));
     const hasStrongIntent = hasStrongIntentKeyword(norm);
+
+    // 0c. Short affirmation — "اه", "نعم", "أكيد", "تمام", "ok", etc.
+    // These are CONTEXT-DEPENDENT — the LLM must use the prior conversation to
+    // interpret them correctly. We tag them 'affirmation' so:
+    //   a) they never corrupt pending_intent (treated like 'unknown' for intent resolution)
+    //   b) the classifierHint explicitly tells the LLM "customer is saying yes"
+    // Guard: skip if a strong intent keyword is also present ("أكيد بدي احجز"
+    // should stay 'booking', not 'affirmation').
+    if (AFFIRMATION_PATTERN.test(norm) && norm.length < 25 && !hasStrongIntent) {
+        return {
+            intent: 'affirmation',
+            confidence: 0.9,
+            cannedResponse: null,
+            entities,
+        };
+    }
 
     // 1. Greetings — very high confidence canned response.
     //    Guards: short message AND no strong intent keyword AND no FAQ
