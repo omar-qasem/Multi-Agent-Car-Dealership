@@ -702,7 +702,6 @@ class GeminiService {
                     llm2Abort.abort();
                 }, llm2BudgetMs);
 
-                let llm2Failed = false;
                 try {
                     // LLM2 only formats tool results → needs fewer tokens → faster.
                     // But reasoning models spend most of their output budget on the
@@ -720,7 +719,6 @@ class GeminiService {
                     assistantMessage = response.choices[0].message;
                 } catch (llm2Err) {
                     logger.warn(`⚠️ LLM2 failed (${llm2Err?.message}) — using tool result template`);
-                    llm2Failed = true;
                     // Build template from last tool result
                     for (const tr of toolResults) {
                         const template = this._formatToolFallback(tr.name, tr.content);
@@ -829,6 +827,19 @@ class GeminiService {
     }
 
     _fallbackResponse(message, startTime, convState = null) {
+        // Short answer after a bot question — don't show the generic menu.
+        // If history shows the bot just asked something, the one-word reply
+        // is almost certainly an answer to that question. Route them to retry.
+        const lastBotMsg = convState?.history?.filter(h => h.role === 'assistant').at(-1)?.content || '';
+        const isShortReply = (message || '').trim().split(/\s+/).length <= 3;
+        if (isShortReply && lastBotMsg.length > 20) {
+            return {
+                response: 'آسف، صار عندي مشكلة بسيطة 🙏\nأعد إرسال رسالتك أو اتصل: 06-5000001',
+                responseTime: Date.now() - startTime,
+                toolsUsed: [], toolCallCount: 0, escalated: false, fromCache: false,
+            };
+        }
+
         // If there's an active booking flow, tell the customer their data is safe
         const flowState = convState?.flow_state;
         if (flowState?.flow_id === 'booking' && flowState.step !== 'done' && flowState.collected) {
