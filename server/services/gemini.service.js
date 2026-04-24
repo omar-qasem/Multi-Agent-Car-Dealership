@@ -229,6 +229,28 @@ class GeminiService {
                 const status = err?.status || err?.statusCode;
                 const msg    = err?.message || '';
 
+                // 413 Request Too Large — prompt + max_tokens exceeds the model's
+                // per-minute token budget on the current Groq service tier.
+                // qwen/qwen3-32b on free/on_demand = 6K TPM; our typical request
+                // (system prompt + 12 tools + history + reasoning budget) = ~6900 tokens.
+                // Retry with llama-3.1-8b-instant (20K TPM on free tier), a shorter
+                // output budget, and trimmed history so the retry fits in one shot.
+                if (status === 413 && attempt < 2) {
+                    const requested = msg.match(/Requested (\d+)/)?.[1] || '?';
+                    logger.warn(`⚠️ Groq 413: request too large (${effectiveParams.model}, ~${requested} tokens, limit 6K TPM) — switching to llama-3.1-8b-instant with trimmed context`);
+                    // Keep system message; trim to last 4 turns
+                    const allMsgs = effectiveParams.messages || [];
+                    const sysMsg  = allMsgs.find(m => m.role === 'system');
+                    const nonSys  = allMsgs.filter(m => m.role !== 'system').slice(-4);
+                    effectiveParams.messages = sysMsg ? [sysMsg, ...nonSys] : nonSys;
+                    effectiveParams.max_tokens = 400;
+                    effectiveParams.model = 'llama-3.1-8b-instant';
+                    // reasoning params not supported on llama
+                    delete effectiveParams.reasoning_effort;
+                    delete effectiveParams.reasoning_format;
+                    continue;
+                }
+
                 // 400 model_decommissioned — the GROQ_MODEL env var points to a
                 // retired model. Override to the hardcoded safe default and retry.
                 if (status === 400 && err?.error?.code === 'model_decommissioned' && attempt < 2) {
