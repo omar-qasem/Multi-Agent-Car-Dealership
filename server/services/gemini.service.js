@@ -38,7 +38,10 @@ const SYSTEM_PROMPT = '# أبو الزوز — مساعد أوتو جوردن �
 '3. **ممنوع استدعاء أداة كتابة** (book_maintenance / create_purchase_inquiry / submit_support_ticket) قبل جمع **كل** حقولها\n' +
 '4. **خطأ تقني** → "واجهنا مشكلة بسيطة، اتصل 06-5000001" فقط\n' +
 '5. **بيانات RAG في السياق؟** → اعتمد عليها مباشرة، لا تعيد استدعاء search_cars أو check_parts_inventory\n' +
-'6. **ذاكرة العميل مرجعية فقط** — ما يقوله في رسالته الحالية يأخذ الأولوية على الذاكرة\n\n' +
+'6. **ذاكرة العميل مرجعية فقط** — ما يقوله في رسالته الحالية يأخذ الأولوية على الذاكرة\n' +
+'7. **ممنوع وصف استخدام الأداة للعميل** — لا تكتب "سأستخدم أداة X" أو "حسناً استخدم أداة Y" أو "ابحث عن..." — استدعِ الأداة مباشرةً بصمت\n' +
+'8. **ممنوع X أو [...] كمكان شاغر** — إذا ما عندك معلومة اسأل سؤالاً محدداً — لا تُرسل رسالة ناقصة تحتوي X أو [اسم] أو مكان شاغر\n' +
+'9. **compare_cars** — استخدم الماركة والموديل اللي ذكرهم العميل فقط — لا تخترع موديلات من عندك\n\n' +
 '---\n\n' +
 '## 🔧 حجز الصيانة:\n\n' +
 '**خدمات مقبولة:** صيانة دورية، تغيير زيت، فرامل/بريك، مكيف، كهرباء، إطارات/كوشوك، بنشر/مبشر، سمكرة ودهان، تظليل شبابيك، بطارية، تبديل زجاج، فحص شامل، برمجة، ناقل حركة، حزام توقيت، عادم\n\n' +
@@ -96,7 +99,8 @@ const SYSTEM_PROMPT = '# أبو الزوز — مساعد أوتو جوردن �
 // Shorter prompt for the fallback model (llama-3.1-8b-instant after 413)
 const PROMPT_FALLBACK =
 'أنت "أبو الزوز" مساعد أوتو جوردن 🚗. لهجة أردنية ودية، ردود قصيرة، سؤال واحد في كل رد.\n\n' +
-'قواعد: ممنوع اختراع أسعار | ممنوع تأكيد حجز بدون booking_id | ممنوع استدعاء أداة كتابة قبل جمع كل حقولها | خطأ تقني → "واجهنا مشكلة، اتصل 06-5000001" | ذاكرة العميل مرجعية فقط — ما يقوله الآن يأخذ الأولوية\n\n' +
+'قواعد: ممنوع اختراع أسعار | ممنوع تأكيد حجز بدون booking_id | ممنوع استدعاء أداة كتابة قبل جمع كل حقولها | خطأ تقني → "واجهنا مشكلة، اتصل 06-5000001" | ذاكرة العميل مرجعية فقط — ما يقوله الآن يأخذ الأولوية\n' +
+'ممنوع وصف استخدام أداة للعميل — استدعِ الأداة بصمت ولا تكتب "سأستخدم أداة X" | ممنوع كتابة X كمكان شاغر — اسأل العميل إذا ما عندك المعلومة\n\n' +
 'الحجز: اجمع (خدمة + ماركة + موديل + تاريخ + فرع) → check_branch_availability → book_maintenance\n' +
 'الشراء: search_cars بالفلاتر → create_purchase_inquiry عند الاهتمام الجدي\n' +
 'القطع: check_parts_inventory | شكوى/موظف: submit_support_ticket\n\n' +
@@ -378,6 +382,27 @@ class GeminiService {
         //    Heuristic: starts with { or [ and ends with } or ]
         if (/^\s*[\[{][\s\S]*[\]}]\s*$/.test(text)) {
             logger.warn('⚠️ sanitizeOutput: stripped raw JSON response from LLM');
+            return null;
+        }
+
+        // 3a. Strip tool-narration leakage: model described what tool it planned to use
+        //     instead of actually calling the tool (empty tool_calls, text-only response)
+        const NARRATION_PATTERNS = [
+            /استخدم أداة\s+\w+/i,      // "استخدم أداة compare_cars"
+            /سأستخدم أداة/i,             // "سأستخدم أداة X"
+            /بستخدم أداة/i,              // dialect form
+            /استدعِ\s+\w+/i,            // "استدعِ search_cars"
+            /ابحث عن .{4,} في المخزون/i, // "ابحث عن Toyota... في المخزون"
+        ];
+        if (NARRATION_PATTERNS.some(p => p.test(text))) {
+            logger.warn('⚠️ sanitizeOutput: stripped tool-narration leakage from LLM response');
+            return null;
+        }
+
+        // 3b. Strip responses that contain a bare "X" placeholder (model didn't fill a value)
+        //     Only trigger on short responses to avoid false positives on car names like "MX-5"
+        if (text.length < 200 && /(?<!\w)X(?!\w)/.test(text)) {
+            logger.warn('⚠️ sanitizeOutput: stripped X-placeholder response from LLM');
             return null;
         }
 
