@@ -129,7 +129,7 @@ class GeminiService {
         // long-running process gives the primary model another chance the next day.
         this._primaryModelExhausted = false;
         this._exhaustedUtcDate = null; // 'YYYY-MM-DD' of when we hit TPD
-        this.maxHistory    = 14;  // Last 7 turns — enough for full booking flow
+        this.maxHistory    = 10;  // Last 5 turns — keeps input under 6K TPM for qwen3-32b
         this.maxToolCalls  = 3;   // Hard cap on tool round-trips
         this._initialize();
         this._loadPersistedFlags(); // async, non-blocking
@@ -279,18 +279,19 @@ class GeminiService {
                 // output budget, and trimmed history so the retry fits in one shot.
                 if (status === 413 && attempt < 2) {
                     const requested = msg.match(/Requested (\d+)/)?.[1] || '?';
-                    logger.warn(`⚠️ Groq 413: request too large (${effectiveParams.model}, ~${requested} tokens, limit 6K TPM) — switching to llama-3.1-8b-instant with trimmed context (no tools)`);
-                    // Keep system message; trim to last 4 turns
+                    // Fall back to llama-3.3-70b-versatile (TPM: 12K+) which KEEPS tool
+                    // support. Previously used llama-3.1-8b-instant with tools stripped,
+                    // causing the model to narrate tool calls as text instead of executing
+                    // them — breaking every flow that needs search_cars, book_maintenance, etc.
+                    logger.warn(`⚠️ Groq 413: request too large (${effectiveParams.model}, ~${requested} tokens) — falling back to ${this.fallbackModel} with trimmed context`);
                     const allMsgs = effectiveParams.messages || [];
                     const sysMsg  = allMsgs.find(m => m.role === 'system');
-                    const nonSys  = allMsgs.filter(m => m.role !== 'system').slice(-4);
+                    const nonSys  = allMsgs.filter(m => m.role !== 'system').slice(-6);
                     effectiveParams.messages  = sysMsg ? [sysMsg, ...nonSys] : nonSys;
-                    effectiveParams.max_tokens = 400;
-                    effectiveParams.model      = 'llama-3.1-8b-instant';
-                    // Strip tools — llama-3.1-8b-instant emits malformed tool calls
-                    // when context is trimmed; plain text response is safer here.
-                    effectiveParams.tools       = undefined;
-                    effectiveParams.tool_choice = undefined;
+                    effectiveParams.max_tokens = 600;
+                    effectiveParams.model      = this.fallbackModel;
+                    // Remove reasoning params — llama models don't support them.
+                    // Tools stay enabled: llama-3.3-70b-versatile handles tool calls well.
                     delete effectiveParams.reasoning_effort;
                     delete effectiveParams.reasoning_format;
                     continue;
@@ -388,12 +389,15 @@ class GeminiService {
 
         // 3a. Strip tool-narration leakage: model described what tool it planned to use
         //     instead of actually calling the tool (empty tool_calls, text-only response)
+        const TOOL_NAMES = 'search_cars|book_maintenance|check_parts_inventory|compare_cars|check_branch_availability|check_availability|calculate_financing|get_promotions|get_branch_info|submit_support_ticket|create_purchase_inquiry|get_customer_bookings';
         const NARRATION_PATTERNS = [
-            /استخدم أداة\s+\w+/i,      // "استخدم أداة compare_cars"
-            /سأستخدم أداة/i,             // "سأستخدم أداة X"
-            /بستخدم أداة/i,              // dialect form
-            /استدعِ\s+\w+/i,            // "استدعِ search_cars"
-            /ابحث عن .{4,} في المخزون/i, // "ابحث عن Toyota... في المخزون"
+            /استخدم أداة\s+\w+/i,                       // "استخدم أداة compare_cars"
+            new RegExp(`استخدم\\s+(${TOOL_NAMES})\\b`, 'i'), // "استخدم search_cars مع الفلاتر"
+            /سأستخدم أداة/i,
+            /بستخدم أداة/i,
+            /استدعِ\s+\w+/i,
+            /ابحث عن .{4,} في المخزون/i,
+            /\bmake\s*=\s*\w+.{0,80}\bmodel\s*=\s*\w+/i, // "make = Kia, model = Cerato"
         ];
         if (NARRATION_PATTERNS.some(p => p.test(text))) {
             logger.warn('⚠️ sanitizeOutput: stripped tool-narration leakage from LLM response');
@@ -479,7 +483,7 @@ class GeminiService {
                 if (cp.preferred_branch)  memParts.push(`فرعه المفضل: ${cp.preferred_branch}`);
                 if (cp.customer_notes)    memParts.push(`ملاحظات: ${cp.customer_notes}`);
                 if (memParts.length > 0) {
-                    customerMemory = `\n\n## ذاكرة العميل (من محادثات سابقة):\n${memParts.join('\n')}\nاستخدم هذه المعلومات مباشرة ولا تسأل العميل عنها إذا كانت موجودة.`;
+                    customerMemory = `\n\n## ذاكرة العميل (من محادثات سابقة — مرجعية فقط):\n${memParts.join('\n')}\nللصيانة: استخدم السيارة المحفوظة إذا لم يذكر العميل غيرها. للشراء أو القطع: لا تفرض الماركة القديمة — إذا ذكر ماركة أو نوعاً مختلفاً في المحادثة الحالية أعطِه الأولوية.`;
                     logger.info(`🧠 Customer memory loaded: ${memParts.join(' | ')}`);
                 }
             }
@@ -565,7 +569,7 @@ class GeminiService {
             while (history.length > this.maxHistory) history.shift();
 
             // ── Use RAG result from parallel fetch ──────────────────
-            const MAX_RAG_CHARS = 800; // Increased from 300 — avoids truncating mid-sentence
+            const MAX_RAG_CHARS = 450; // Kept short to stay under qwen3-32b 6K TPM limit
             let ragContext = '';
             if (ragResult.status === 'fulfilled' && ragResult.value) {
                 ragContext = ragResult.value.substring(0, MAX_RAG_CHARS);
@@ -691,10 +695,10 @@ class GeminiService {
             // `reasoning_format: 'hidden'` the CoT is dropped from the
             // response but it still counts against max_tokens.
             //
-            // Budget: 1500 keeps total request (input ~4200 + output 1500)
-            // at ~5700 tokens — safely under Groq free-tier's 6K TPM limit
-            // for qwen/qwen3-32b, avoiding the 413 fallback entirely.
-            // Non-reasoning models keep the tight 450 (no CoT overhead).
+            // Budget: 1000 for reasoning models (CoT ~600 + response ~400) keeps total
+            // request (input ~4800 + output 1000) at ~5800 tokens — safely under the
+            // 6K TPM limit for qwen/qwen3-32b on Groq free tier, avoiding 413 entirely.
+            // Reduced from 1500 after logs showed consistent 413 at ~6664 tokens.
             const reasoning = this._reasoningParamsFor(activeModel);
             const usingReasoning = Object.keys(reasoning).length > 0;
 
@@ -702,7 +706,7 @@ class GeminiService {
                 model: activeModel,
                 tools: activeTools,
                 tool_choice: 'auto',
-                max_tokens: usingReasoning ? 1500 : 450,
+                max_tokens: usingReasoning ? 1000 : 400,
                 temperature: usingReasoning ? 0.6 : 0.2, // Qwen3 docs recommend 0.6 when reasoning is on
                 ...reasoning,
             };
