@@ -51,6 +51,12 @@ const CAR_MAKES = {
     'شيري': 'Chery', 'جيري': 'Chery', 'chery': 'Chery',
     // BMW
     'بي ام': 'BMW', 'بي ام دبليو': 'BMW', 'bmw': 'BMW',
+    // Neta (Hozon) — Chinese EV brand increasingly common in Jordan
+    'نيتا': 'Neta', 'نيتو': 'Neta', 'neta': 'Neta',
+    // BYD — Chinese EV brand
+    'بي واي دي': 'BYD', 'byd': 'BYD',
+    // Geely
+    'جيلي': 'Geely', 'geely': 'Geely',
 };
 
 // Two lists: Arabic models (substring-safe because they're long) and
@@ -69,6 +75,8 @@ const CAR_MODELS_EN = [
     'Sportage', 'Cerato',
     'Sunny', 'Altima',
     '320i', 'Tiggo', 'ZS', 'HS',
+    // Neta models
+    'YU', 'Neta V', 'Neta GT',
 ];
 
 const SERVICE_TYPES = {
@@ -85,6 +93,7 @@ const SERVICE_TYPES = {
     'مكيف': 'صيانة مكيف',
     'فرامل': 'فرامل',
     'بريك': 'فرامل',
+    'بركات': 'فرامل',   // Jordanian dialect for brakes
     'اطارات': 'اطارات',
     'طايرات': 'اطارات',
     'إطارات': 'اطارات',

@@ -94,7 +94,8 @@ const SYSTEM_PROMPT = '# أبو الزوز — مساعد أوتو جوردن �
 '- شكوى أو طلب مدير → submit_support_ticket (priority=high)\n' +
 '- سؤال غير واضح → اسأل سؤالاً واحداً لتوضيح النية\n' +
 '- العميل يرفض الخيارات → "تفهمك، اتصل 06-5000001 ومنلاقيلك حل"\n' +
-'- خارج الدوام → رد وخزّن الطلب، يتواصلوا معه أول الدوام';
+'- خارج الدوام → رد وخزّن الطلب، يتواصلوا معه أول الدوام\n' +
+'- **اسم العميل يشبه اسم سيارة/ماركة** → اعتمد على السياق: إذا سألته "ما ماركة سيارتك؟" وردّ بكلمة واحدة — هذي الكلمة هي الماركة وليست تحية، لا تردّ كأنها سلام';
 
 // Shorter prompt for the fallback model (llama-3.1-8b-instant after 413)
 const PROMPT_FALLBACK =
@@ -586,18 +587,53 @@ class GeminiService {
             }
 
             // ── Build messages ──────────────────────────────────────
-            // Inject classifier context so the LLM doesn't waste tokens re-extracting
+            // Inject classifier context so the LLM doesn't waste tokens re-extracting.
+            //
+            // CRITICAL FIX: Previously gated on `intent !== 'unknown'`, which meant
+            // short contextual replies ("نيتا يو", "العقبة", "بكرا") — the most
+            // common in-flow messages — NEVER got the pending_intent injected.
+            // The LLM then had no signal it was mid-conversation and would treat
+            // the reply as a new topic or greeting. Always inject pending_intent
+            // whenever it exists, regardless of the current message's intent.
             let classifierHint = '';
-            if (classification.intent !== 'unknown') {
+            const pendingIntent = convState?.pending_intent;
+            const hasEntities   = Object.keys(mergedEntities).length > 0;
+
+            if (classification.intent !== 'unknown' || pendingIntent || hasEntities) {
                 classifierHint += `\n\n## سياق المصنّف (classifier context):`;
-                classifierHint += `\n- النية المكتشفة: ${classification.intent} (ثقة: ${classification.confidence})`;
-                if (convState?.pending_intent && convState.pending_intent !== classification.intent) {
-                    classifierHint += `\n- نية معلّقة من الرسالة السابقة: ${convState.pending_intent}`;
+
+                if (classification.intent !== 'unknown') {
+                    classifierHint += `\n- النية المكتشفة: ${classification.intent} (ثقة: ${classification.confidence})`;
+                }
+
+                // Always surface the pending intent — even when current message is 'unknown'.
+                // Add an explicit note for the LLM when the reply looks contextual (short
+                // unknown message during an active flow) so it doesn't mistake it for a
+                // greeting or a brand-new request.
+                if (pendingIntent) {
+                    classifierHint += `\n- النية المستمرة من المحادثة: ${pendingIntent}`;
+                    if (classification.intent === 'unknown') {
+                        classifierHint += ` — هذه رسالة ضمن محادثة جارية، ليست تحية ولا موضوع جديد`;
+                    }
+                }
+
+                if (hasEntities) {
+                    classifierHint += `\n- الكيانات المستخرجة (تراكمي): ${JSON.stringify(mergedEntities)}`;
+                    classifierHint += `\n- استخدم هذه الكيانات مباشرة عند استدعاء الأدوات — لا تسأل المستخدم عنها مرة ثانية.`;
                 }
             }
-            if (Object.keys(mergedEntities).length > 0) {
-                classifierHint += `\n- الكيانات المستخرجة (تراكمي): ${JSON.stringify(mergedEntities)}`;
-                classifierHint += `\n- استخدم هذه الكيانات مباشرة عند استدعاء الأدوات — لا تسأل المستخدم عنها مرة ثانية.`;
+
+            // Short in-flow reply guard: when the customer sends ≤4 words during
+            // an active booking collection step and the classifier returns no intent,
+            // their reply is almost certainly the answer to the AI's last question.
+            // Inject an explicit note so the LLM extracts the value and moves on
+            // instead of treating it as a greeting or failing to understand context.
+            if (
+                flowDirective.mode === 'collect' &&
+                classification.intent === 'unknown' &&
+                userMessage.trim().split(/\s+/).length <= 4
+            ) {
+                classifierHint += `\n- ⚡ رد قصير في وسط حجز: "${userMessage.trim()}" هو جواب على آخر سؤال طرحته — استخرج القيمة منه مباشرة ولا تعامله كتحية`;
             }
 
             // P0-04: Keep write tools enabled on the fallback model. Previously we
@@ -632,9 +668,14 @@ class GeminiService {
             const todayStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
             const dateHint = `\n\n📅 تاريخ اليوم: ${todayStr} — استخدم هذا التاريخ كمرجع لأي حجز أو فحص توفر.`;
 
-            const systemNote = customerName
-                ? `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}${dateHint}\nالعميل: ${customerName} | رقمه: ${phoneNumber}`
-                : `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}${dateHint}\nرقم العميل: ${phoneNumber}`;
+            // Wrap customer name in guillemets + explicit metadata label so the LLM
+            // never confuses it with a message the customer just sent. Without this,
+            // a customer whose WhatsApp name matches their car model (e.g. "نيتا يو")
+            // causes the LLM to greet them mid-booking instead of storing the value.
+            const customerMeta = customerName
+                ? `[بيانات العميل] اسم واتساب: «${customerName}» | رقم: ${phoneNumber} — هذا اسم الملف الشخصي فقط، لا تخلطه مع ردوده في المحادثة`
+                : `[بيانات العميل] رقم: ${phoneNumber}`;
+            const systemNote = `${basePrompt}${customerMemory}${flowContext}${ragContext}${classifierHint}${fallbackReminder}${dateHint}\n${customerMeta}`;
 
             const messages = [
                 { role: 'system', content: systemNote },
