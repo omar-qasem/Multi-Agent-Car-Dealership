@@ -237,17 +237,29 @@ class GeminiService {
                 // output budget, and trimmed history so the retry fits in one shot.
                 if (status === 413 && attempt < 2) {
                     const requested = msg.match(/Requested (\d+)/)?.[1] || '?';
-                    logger.warn(`⚠️ Groq 413: request too large (${effectiveParams.model}, ~${requested} tokens, limit 6K TPM) — switching to llama-3.1-8b-instant with trimmed context`);
+                    logger.warn(`⚠️ Groq 413: request too large (${effectiveParams.model}, ~${requested} tokens, limit 6K TPM) — switching to llama-3.1-8b-instant with trimmed context (no tools)`);
                     // Keep system message; trim to last 4 turns
                     const allMsgs = effectiveParams.messages || [];
                     const sysMsg  = allMsgs.find(m => m.role === 'system');
                     const nonSys  = allMsgs.filter(m => m.role !== 'system').slice(-4);
-                    effectiveParams.messages = sysMsg ? [sysMsg, ...nonSys] : nonSys;
+                    effectiveParams.messages  = sysMsg ? [sysMsg, ...nonSys] : nonSys;
                     effectiveParams.max_tokens = 400;
-                    effectiveParams.model = 'llama-3.1-8b-instant';
-                    // reasoning params not supported on llama
+                    effectiveParams.model      = 'llama-3.1-8b-instant';
+                    // Strip tools — llama-3.1-8b-instant emits malformed tool calls
+                    // when context is trimmed; plain text response is safer here.
+                    effectiveParams.tools       = undefined;
+                    effectiveParams.tool_choice = undefined;
                     delete effectiveParams.reasoning_effort;
                     delete effectiveParams.reasoning_format;
+                    continue;
+                }
+
+                // 400 tool_use_failed — model emitted tool calls in a bad format.
+                // Retry without tools so the model gives a plain text response.
+                if (status === 400 && err?.error?.code === 'tool_use_failed' && attempt < 2) {
+                    logger.warn(`⚠️ Groq tool_use_failed (${effectiveParams.model}) — retrying without tools`);
+                    effectiveParams.tools       = undefined;
+                    effectiveParams.tool_choice = undefined;
                     continue;
                 }
 
