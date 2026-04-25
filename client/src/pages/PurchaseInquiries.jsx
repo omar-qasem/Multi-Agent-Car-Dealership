@@ -4,8 +4,14 @@ import {
   ShoppingCart, RefreshCw, AlertCircle, Search,
   ChevronDown, Phone, User, Car, DollarSign,
   CheckCircle, MessageSquare, Edit3, X, Save,
-  ArrowRight, Clock, Tag
+  ArrowRight, Clock, Tag, MapPin
 } from 'lucide-react';
+
+const TYPE_TABS = [
+  { key: '',         label: 'الكل',             icon: ShoppingCart },
+  { key: 'purchase', label: 'استفسارات الشراء', icon: ShoppingCart },
+  { key: 'visit',    label: 'زيارات المعرض',    icon: MapPin },
+];
 
 // ── Status pipeline ─────────────────────────────────────────────────────────
 const STATUSES = [
@@ -233,6 +239,7 @@ export default function PurchaseInquiries() {
   const [error,     setError]     = useState(null);
   const [search,    setSearch]    = useState('');
   const [statusF,   setStatusF]   = useState('');
+  const [typeF,     setTypeF]     = useState('');
 
   const fetchInquiries = useCallback(async () => {
     try {
@@ -241,6 +248,7 @@ export default function PurchaseInquiries() {
       const params = {};
       if (statusF) params.status = statusF;
       if (search)  params.search = search;
+      if (typeF)   params.type   = typeF;
       const res = await axios.get('/api/manage/inquiries', { params });
       setInquiries(res.data.data || []);
       setStats(res.data.stats || {});
@@ -250,7 +258,7 @@ export default function PurchaseInquiries() {
     } finally {
       setLoading(false);
     }
-  }, [statusF, search]);
+  }, [statusF, search, typeF]);
 
   useEffect(() => {
     const t = setTimeout(fetchInquiries, search ? 400 : 0);
@@ -273,11 +281,11 @@ export default function PurchaseInquiries() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
-            <ShoppingCart size={24} className="text-indigo-500" />
-            استفسارات الشراء
+            {typeF === 'visit' ? <MapPin size={24} className="text-indigo-500" /> : <ShoppingCart size={24} className="text-indigo-500" />}
+            {typeF === 'visit' ? 'زيارات المعرض' : 'استفسارات الشراء'}
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            إدارة العملاء المهتمين بشراء سيارة
+            {typeF === 'visit' ? 'عملاء يريدون زيارة الفرع لمشاهدة السيارات' : 'إدارة العملاء المهتمين بشراء سيارة'}
           </p>
         </div>
         <button
@@ -288,6 +296,28 @@ export default function PurchaseInquiries() {
           <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
           تحديث
         </button>
+      </div>
+
+      {/* ─── Type Tabs ─── */}
+      <div className="flex gap-2 border-b border-gray-200 dark:border-gray-700">
+        {TYPE_TABS.map(tab => {
+          const Icon = tab.icon;
+          const active = typeF === tab.key;
+          return (
+            <button
+              key={tab.key}
+              onClick={() => { setTypeF(tab.key); setStatusF(''); }}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                active
+                  ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
+              }`}
+            >
+              <Icon size={14} />
+              {tab.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* ─── Pipeline Stats ─── */}
@@ -348,8 +378,8 @@ export default function PurchaseInquiries() {
         </div>
       ) : inquiries.length === 0 ? (
         <div className="flex flex-col items-center justify-center h-48 gap-3 text-gray-400">
-          <ShoppingCart size={48} />
-          <p className="text-sm">لا توجد استفسارات مطابقة</p>
+          {typeF === 'visit' ? <MapPin size={48} /> : <ShoppingCart size={48} />}
+          <p className="text-sm">{typeF === 'visit' ? 'لا توجد زيارات مسجّلة' : 'لا توجد استفسارات مطابقة'}</p>
         </div>
       ) : (
         <div className="space-y-3">

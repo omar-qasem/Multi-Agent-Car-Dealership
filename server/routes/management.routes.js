@@ -204,14 +204,21 @@ router.put('/tickets/:id', authenticateToken, async (req, res) => {
 router.get('/inquiries', authenticateToken, async (req, res) => {
   try {
     const inquiries = await db.getAllInquiries(req.query);
+    // Tab filter: type=visit → notes starts with [VISIT]; type=purchase → everything else
+    const typeFilter = req.query.type;
+    const filtered = typeFilter === 'visit'
+      ? inquiries.filter(i => i.notes && i.notes.startsWith('[VISIT]'))
+      : typeFilter === 'purchase'
+        ? inquiries.filter(i => !i.notes || !i.notes.startsWith('[VISIT]'))
+        : inquiries;
     const stats = {
-      total: inquiries.length,
-      new: inquiries.filter(i => i.status === 'new').length,
-      contacted: inquiries.filter(i => i.status === 'contacted').length,
-      qualified: inquiries.filter(i => i.status === 'qualified').length,
-      closed: inquiries.filter(i => i.status === 'closed').length,
+      total: filtered.length,
+      new: filtered.filter(i => i.status === 'new').length,
+      contacted: filtered.filter(i => i.status === 'contacted').length,
+      qualified: filtered.filter(i => i.status === 'qualified').length,
+      closed: filtered.filter(i => i.status === 'closed').length,
     };
-    res.json({ success: true, stats, data: inquiries });
+    res.json({ success: true, stats, data: filtered });
   } catch (err) {
     logger.error('❌ خطأ في جلب الاستفسارات:', err);
     res.status(500).json({ success: false, message: err.message });

@@ -43,7 +43,11 @@ const SYSTEM_PROMPT = '# أبو الزوز — مساعد أوتو جوردن �
 '8. **ممنوع X أو [...] كمكان شاغر** — إذا ما عندك معلومة اسأل سؤالاً محدداً — لا تُرسل رسالة ناقصة تحتوي X أو [اسم] أو مكان شاغر\n' +
 '9. **compare_cars** — استخدم الماركة والموديل اللي ذكرهم العميل فقط — لا تخترع موديلات من عندك\n' +
 '10. **سياق الشراء والصيانة لا يختلطان أبداً** — `check_branch_availability` و`book_maintenance` لصيانة السيارات حصراً. إذا كان pending_intent=purchase أو ظهرت نتائج search_cars → أي ذكر لوقت/تاريخ/حجز/موعد من العميل يعني اختبار قيادة أو تسليم سيارة → استدعِ create_purchase_inquiry فقط. لا تستدعِ book_maintenance في سياق الشراء أبداً حتى لو قال "بكرا الساعة 5" أو "عال٥ العصر".\n' +
-'11. **اختيار من نتائج البحث** — إذا قال العميل "[لون]/الأولى/الثانية/هاي/هادي" بعد ما عرضت search_cars → لا تبدأ search_cars من جديد ولا تسأل "شو الماركة" — ابحث في تاريخ المحادثة عن السيارة التي يقصدها واستدعِ create_purchase_inquiry مباشرة\n\n' +
+'11. **اختيار من نتائج البحث** — إذا قال العميل "[لون]/الأولى/الثانية/هاي/هادي" بعد ما عرضت search_cars → لا تبدأ search_cars من جديد ولا تسأل "شو الماركة" — ابحث في تاريخ المحادثة عن السيارة التي يقصدها واستدعِ create_purchase_inquiry مباشرة\n' +
+'12. **زيارة المعرض** — إذا قال العميل "بدي اجي اشوف"/"متى بقدر اجي"/"بدنا نزور" أو كان wants_visit=true في classifier entities → لا تحجز صيانة ولا تسأل عن موديل للصيانة. بدلاً من ذلك:\n' +
+'   أ) أخبره بساعات الدوام ورحّب به: "يتشرفنا زيارتك 🤝"\n' +
+'   ب) استدعِ create_purchase_inquiry مع notes يبدأ بـ [VISIT] لتسجيل رغبة الزيارة.\n' +
+'   ج) لا تستدعِ check_branch_availability أو book_maintenance أبداً — هذه للصيانة فقط.\n\n' +
 '---\n\n' +
 '## 🔧 حجز الصيانة:\n\n' +
 '**خدمات مقبولة:** صيانة دورية، تغيير زيت، فرامل/بريك، مكيف، كهرباء، إطارات/كوشوك، بنشر/مبشر، سمكرة ودهان، تظليل شبابيك، بطارية، تبديل زجاج، فحص شامل، برمجة، ناقل حركة، حزام توقيت، عادم\n\n' +
@@ -106,6 +110,7 @@ const PROMPT_FALLBACK =
 'ممنوع وصف استخدام أداة للعميل — استدعِ الأداة بصمت ولا تكتب "سأستخدم أداة X" | ممنوع كتابة X كمكان شاغر — اسأل العميل إذا ما عندك المعلومة\n\n' +
 'الحجز: اجمع (خدمة + ماركة + موديل + تاريخ + فرع) → check_branch_availability → book_maintenance\n' +
 '⛔ إذا كان pending_intent=purchase في السياق → لا تستدعِ check_branch_availability أو book_maintenance أبداً حتى لو ذكر العميل وقتاً — هذا لاختبار القيادة → استدعِ create_purchase_inquiry\n' +
+'🏢 زيارة المعرض (wants_visit=true أو ذكر "بدي اجي اشوف"): أخبره بالدوام + رحّب به + استدعِ create_purchase_inquiry مع notes=[VISIT]. لا تستدعِ book_maintenance.\n' +
 'الشراء: search_cars بالفلاتر → create_purchase_inquiry عند الاهتمام الجدي\n' +
 'القطع: check_parts_inventory | شكوى/موظف: submit_support_ticket\n\n' +
 'أوتو جوردن: 📞 06-5000001 | عمان، إربد، الزرقاء، العقبة | أحد-خميس 8ص-8م | جمعة 8ص-2م | سبت 8ص-6م';
@@ -450,6 +455,7 @@ class GeminiService {
             case 'purchase':  selected = PURCHASE;  break;
             case 'parts':     selected = PARTS;     break;
             case 'price':     selected = PRICE_MIX; break;
+            case 'visit':     selected = ['get_branch_info', 'create_purchase_inquiry']; break;
             case 'support':   selected = ['submit_support_ticket']; break;
             case 'promotions':selected = INFO;      break;
             case 'faq_hours': case 'faq_branches': case 'faq_phone':
@@ -567,7 +573,14 @@ class GeminiService {
             }
 
             // ── Canned response short-circuit ───────────────────────
-            if (classification.cannedResponse) {
+            // Guard: skip menu-digit responses when an active context exists.
+            // A bare digit "1"-"5" mid-conversation is a list selection, not main-menu nav.
+            const _isMenuDigit = userMessage.trim().replace(/[^\d]/g, '').length === 1 &&
+                classification.confidence >= 0.9 &&
+                ['purchase', 'parts', 'booking', 'promotions', 'support'].includes(classification.intent);
+            const _hasActiveCtx = !!(convState?.pending_intent ||
+                (convState?.flow_state && convState.flow_state.step !== 'done'));
+            if (classification.cannedResponse && !(_isMenuDigit && _hasActiveCtx)) {
                 history.push({ role: 'user', content: userMessage });
                 history.push({ role: 'assistant', content: classification.cannedResponse });
                 while (history.length > this.maxHistory) history.shift();
@@ -703,6 +716,10 @@ class GeminiService {
                     if (mergedEntities.color) {
                         classifierHint += ` اللون المطلوب: ${mergedEntities.color}.`;
                     }
+                }
+
+                if (classification.entities?.wants_visit || mergedEntities.wants_visit) {
+                    classifierHint += `\n- 🏢 العميل يريد زيارة المعرض شخصياً — أخبره بساعات الدوام، رحّب به بـ "يتشرفنا زيارتك 🤝"، واستدعِ create_purchase_inquiry مع notes تبدأ بـ [VISIT]. لا تستدعِ check_branch_availability أو book_maintenance.`;
                 }
 
                 if (hasEntities) {

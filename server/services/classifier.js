@@ -210,6 +210,10 @@ const GOODBYE_PATTERNS = /^(?:شكر[اً]?|يسلمو|يعطيك|باي|ودا�
 // These must NOT be classified as greetings or unknown.
 const AFFIRMATION_PATTERN = /^(?:اه|آه|أه|أيوه|ايوه|نعم|أكيد|اكيد|موافق|صح|تمام|يلا|طيب|ماشي|حلو|زين|مضبوط|يس|yes|ok|okay|sure|يوك|أيه|ايه|مم|أمم|هه|ها)[\s!.،؟🙂😊👍✅]*$/i;
 
+// Showroom visit intent — customer wants to come in person to see a car.
+// Triggers a "welcome to branch + opening hours" response instead of booking maintenance.
+const VISIT_PATTERN = /(?:بدي\s+(?:اجي|أجي|آجي|اشوف|أشوف|نجي|نشوف)|بجي\s+(?:اشوف|عندكم|على\s*الفرع|للمعرض)|(?:متى|امتى)\s+(?:بقدر|اقدر|أقدر)\s+(?:اجي|أجي)|اشوفها\s+(?:شخصياً|شخصيا|وجاهاً)|بدنا\s+(?:نجي|ناجي|نشوف)\s|زيارة\s+(?:الفرع|المعرض))/i;
+
 // Negation prefixes — if any of these appear right before an intent verb,
 // the intent should NOT fire. ("ما بدي احجز" must not be tagged as booking.)
 const NEGATION_REGEX = /\b(ما|مش|مو|لا)\s+/i;
@@ -554,6 +558,7 @@ function classify(text) {
     const fuel      = extractFuelType(norm);     if (fuel)      entities.fuel_type   = fuel;
     const condition = extractCondition(norm);    if (condition) entities.condition   = condition;
     const color     = extractColor(norm);        if (color)     entities.color       = color;
+    if (VISIT_PATTERN.test(norm))                               entities.wants_visit = true;
 
     // Pre-compute compound-query guards so greeting/FAQ don't hijack a
     // message that also carries a real question or intent.
@@ -618,6 +623,20 @@ function classify(text) {
                 };
             }
         }
+    }
+
+    // 2.5. Showroom visit — customer wants to come in person to see a car.
+    // Must fire before generic strong-intent patterns so "بدي اجي اشوف" isn't
+    // misread as a booking or purchase request.
+    const visitMatch = VISIT_PATTERN.exec(norm);
+    if (visitMatch && !isNegated(norm, visitMatch.index)) {
+        entities.wants_visit = true;
+        return {
+            intent: 'visit',
+            confidence: 0.88,
+            cannedResponse: null,
+            entities,
+        };
     }
 
     // 3. Strong intent keywords — DON'T skip the LLM, but tag the intent
