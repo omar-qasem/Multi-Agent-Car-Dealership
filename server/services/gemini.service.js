@@ -42,7 +42,8 @@ const SYSTEM_PROMPT = '# أبو الزوز — مساعد أوتو جوردن �
 '7. **ممنوع وصف استخدام الأداة للعميل** — لا تكتب "سأستخدم أداة X" أو "حسناً استخدم أداة Y" أو "ابحث عن..." — استدعِ الأداة مباشرةً بصمت\n' +
 '8. **ممنوع X أو [...] كمكان شاغر** — إذا ما عندك معلومة اسأل سؤالاً محدداً — لا تُرسل رسالة ناقصة تحتوي X أو [اسم] أو مكان شاغر\n' +
 '9. **compare_cars** — استخدم الماركة والموديل اللي ذكرهم العميل فقط — لا تخترع موديلات من عندك\n' +
-'10. **"احجزلي"/"اخذها"/"اقصطها" في سياق الشراء** — إذا كان pending_intent=purchase أو عرضت نتائج search_cars وطلب العميل الشراء/الحجز → استدعِ create_purchase_inquiry، وليس book_maintenance (الذي هو لصيانة السيارات فقط)\n\n' +
+'10. **"احجزلي"/"اخذها"/"اقصطها" في سياق الشراء** — إذا كان pending_intent=purchase أو عرضت نتائج search_cars وطلب العميل الشراء/الحجز → استدعِ create_purchase_inquiry، وليس book_maintenance (الذي هو لصيانة السيارات فقط)\n' +
+'11. **اختيار من نتائج البحث** — إذا قال العميل "[لون]/الأولى/الثانية/هاي/هادي" بعد ما عرضت search_cars → لا تبدأ search_cars من جديد ولا تسأل "شو الماركة" — ابحث في تاريخ المحادثة عن السيارة التي يقصدها واستدعِ create_purchase_inquiry مباشرة\n\n' +
 '---\n\n' +
 '## 🔧 حجز الصيانة:\n\n' +
 '**خدمات مقبولة:** صيانة دورية، تغيير زيت، فرامل/بريك، مكيف، كهرباء، إطارات/كوشوك، بنشر/مبشر، سمكرة ودهان، تظليل شبابيك، بطارية، تبديل زجاج، فحص شامل، برمجة، ناقل حركة، حزام توقيت، عادم\n\n' +
@@ -633,6 +634,23 @@ class GeminiService {
                         classifierHint += ` — السياق: حجز صيانة. استمر في جمع بيانات الحجز`;
                     } else {
                         classifierHint += ` — راجع تاريخ المحادثة لتفهم ماذا كان سؤالك السابق`;
+                    }
+                }
+
+                // Purchase-from-results: customer is selecting a car from search results
+                // already shown in this conversation, not starting a new search.
+                // Fires when: current intent=purchase AND previous turn was also purchase
+                // (pendingIntent=purchase) AND no specific car make/model was mentioned —
+                // meaning they're referencing by color, position ("الأولى"), or pronoun.
+                if (
+                    classification.intent === 'purchase' &&
+                    pendingIntent === 'purchase' &&
+                    !mergedEntities.car_make &&
+                    !mergedEntities.car_model
+                ) {
+                    classifierHint += `\n- ⚡ العميل يختار سيارة من نتائج بحث عرضتها في المحادثة (ما ذكر ماركة أو موديل جديد) — راجع تاريخ المحادثة لتحديد أي سيارة يقصد (بالوصف أو اللون أو الترتيب)، ثم استدعِ create_purchase_inquiry مباشرة. لا تبدأ search_cars من جديد ولا تسأل "شو الماركة".`;
+                    if (mergedEntities.color) {
+                        classifierHint += ` اللون المطلوب: ${mergedEntities.color}.`;
                     }
                 }
 

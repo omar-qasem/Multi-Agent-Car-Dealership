@@ -162,6 +162,22 @@ const BRANCH_VARIANTS = {
 };
 const BRANCHES = ['عمان', 'إربد', 'الزرقاء', 'العقبة'];
 
+// Car color variants — used to extract color from messages like "بدي السودا" / "الأبيض"
+// so the LLM can identify which car from search results the customer is selecting.
+const CAR_COLORS = {
+    'أسود': 'أسود', 'اسود': 'أسود', 'سودا': 'أسود', 'السودا': 'أسود', 'black': 'أسود',
+    'أبيض': 'أبيض', 'ابيض': 'أبيض', 'بيضا': 'أبيض', 'البيضا': 'أبيض', 'white': 'أبيض',
+    'أحمر': 'أحمر', 'احمر': 'أحمر', 'حمرا': 'أحمر', 'red': 'أحمر',
+    'رمادي': 'رمادي', 'رصاصي': 'رمادي', 'grey': 'رمادي', 'gray': 'رمادي',
+    'فضي': 'فضي', 'silver': 'فضي',
+    'أزرق': 'أزرق', 'ازرق': 'أزرق', 'زرقا': 'أزرق', 'blue': 'أزرق',
+    'بيج': 'بيج', 'بيجي': 'بيج', 'beige': 'بيج',
+    'لؤلؤي': 'لؤلؤي', 'لولوي': 'لؤلؤي', 'pearl': 'لؤلؤي',
+    'أخضر': 'أخضر', 'akhdar': 'أخضر', 'green': 'أخضر',
+    'بني': 'بني', 'بنية': 'بني', 'brown': 'بني',
+    'برتقالي': 'برتقالي', 'orange': 'برتقالي',
+};
+
 const FUEL_TYPES = {
     'كهربا': 'كهربائي', 'كهربائي': 'كهربائي', 'كهربائية': 'كهربائي',
     'electric': 'كهربائي', 'ev': 'كهربائي',
@@ -435,6 +451,14 @@ function extractCondition(text) {
     return null;
 }
 
+function extractColor(text) {
+    const lower = normalize(text).toLowerCase();
+    for (const [keyword, canonical] of Object.entries(CAR_COLORS)) {
+        if (matchesKeyword(lower, keyword.toLowerCase())) return canonical;
+    }
+    return null;
+}
+
 // Helper: returns true if any strong intent keyword is present.
 function hasStrongIntentKeyword(text) {
     for (const re of Object.values(INTENT_PATTERNS)) {
@@ -529,6 +553,7 @@ function classify(text) {
     const budget    = extractBudget(norm);       if (budget)    entities.budget      = budget;
     const fuel      = extractFuelType(norm);     if (fuel)      entities.fuel_type   = fuel;
     const condition = extractCondition(norm);    if (condition) entities.condition   = condition;
+    const color     = extractColor(norm);        if (color)     entities.color       = color;
 
     // Pre-compute compound-query guards so greeting/FAQ don't hijack a
     // message that also carries a real question or intent.
