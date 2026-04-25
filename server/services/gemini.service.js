@@ -1131,7 +1131,13 @@ class GeminiService {
 
         // NOTE: check maintenance BEFORE generic "سيارة" to avoid misclassifying "صيانة للسيارة"
         } else if (msg.includes('صيانة') || msg.includes('موعد') || msg.includes('احجز') || msg.includes('حجز') || msg.includes('اصلح') || msg.includes('صلح') || msg.includes('تصليح') || msg.includes('سيرفس') || msg.includes('بنشر') || msg.includes('مبشر') || msg.includes('كوشوك') || msg.includes('عجل') || msg.includes('كفر')) {
-            response = 'تكرم! 🔧 محتاج منك:\n• نوع الخدمة (صيانة / فرامل / إطارات / بنشر...)\n• ماركة السيارة وموديلها\n• الفرع (عمان/إربد/الزرقاء/العقبة)\n\nاحكيلي وبحجزلك فوراً!';
+            // If the message already has a car brand — customer gave details, system is just slow
+            const hasMake = /تويوتا|هيونداي|كيا|نيسان|مرسيدس|هوندا|بي ام|نيتا|جيلي|شيري|سوزوكي|toyota|hyundai|kia|nissan|mercedes|honda|bmw|neta/i.test(message);
+            if (hasMake) {
+                response = 'وصلتنا معلوماتك ✅\nعنا مشكلة بسيطة بالنظام هلأ — اتصل: 06-5000001 وبيحجزوا الك مباشرة، أو جرب مرة ثانية بعد قليل.';
+            } else {
+                response = 'تكرم! 🔧 محتاج منك:\n• نوع الخدمة (صيانة / فرامل / إطارات / بنشر...)\n• ماركة السيارة وموديلها\n• الفرع (عمان/إربد/الزرقاء/العقبة)\n\nاحكيلي وبحجزلك فوراً!';
+            }
 
         // Branches / locations
         } else if (msg.includes('فرع') || msg.includes('فروع') || msg.includes('عنوان') || msg.includes('وين')) {
