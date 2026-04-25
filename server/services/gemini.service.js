@@ -426,6 +426,47 @@ class GeminiService {
         return formatToolFallback(toolName, toolResult);
     }
 
+    /**
+     * Return only the tools relevant to the current intent + context.
+     * Sending all 12 tools every turn costs ~1800-2400 tokens.
+     * Filtering to 2-5 relevant tools saves 800-1500 tokens per turn,
+     * keeping total request under qwen3-32b's 6K TPM limit.
+     */
+    _selectTools(intent, pendingIntent, flowState) {
+        const BOOKING   = ['check_branch_availability', 'book_maintenance', 'get_customer_bookings', 'get_branch_info', 'submit_support_ticket'];
+        const PURCHASE  = ['search_cars', 'create_purchase_inquiry', 'compare_cars', 'calculate_financing', 'check_availability', 'get_branch_info', 'submit_support_ticket'];
+        const PARTS     = ['check_parts_inventory', 'check_availability', 'submit_support_ticket'];
+        const INFO      = ['get_promotions', 'get_branch_info', 'submit_support_ticket'];
+        const PRICE_MIX = ['check_parts_inventory', 'check_availability', 'search_cars', 'calculate_financing', 'submit_support_ticket'];
+
+        // Active booking flow always gets booking tools regardless of message intent
+        const effectiveIntent = (flowState?.flow_id === 'booking' && flowState.step !== 'done')
+            ? 'booking'
+            : (intent !== 'unknown' && intent !== 'affirmation' ? intent : (pendingIntent || 'unknown'));
+
+        let selected;
+        switch (effectiveIntent) {
+            case 'booking':   selected = BOOKING;   break;
+            case 'purchase':  selected = PURCHASE;  break;
+            case 'parts':     selected = PARTS;     break;
+            case 'price':     selected = PRICE_MIX; break;
+            case 'support':   selected = ['submit_support_ticket']; break;
+            case 'promotions':selected = INFO;      break;
+            case 'faq_hours': case 'faq_branches': case 'faq_phone':
+            case 'faq_payment': case 'faq_warranty': case 'faq_trade_in':
+                // FAQ intents hit canned response path — LLM rarely called.
+                // If it is called, give it a minimal set.
+                selected = ['get_branch_info', 'submit_support_ticket'];
+                break;
+            default:
+                // No context yet — send all tools so nothing is blocked
+                return TOOL_DEFINITIONS;
+        }
+
+        const nameSet = new Set(selected);
+        return TOOL_DEFINITIONS.filter(t => nameSet.has(t.function?.name));
+    }
+
     async generateResponse(phoneNumber, userMessage, customerName, options = {}) {
         const startTime = Date.now();
 
@@ -696,7 +737,8 @@ class GeminiService {
             // add a stronger reminder to the system prompt on fallback instead.
             const onFallback = this._primaryModelExhausted;
             const activeModel = onFallback ? this.fallbackModel : this.model;
-            const activeTools = TOOL_DEFINITIONS;
+            const activeTools = this._selectTools(classification.intent, pendingIntent, convState?.flow_state);
+            logger.info(`🔧 Tools: ${activeTools.length}/${TOOL_DEFINITIONS.length} selected (intent=${classification.intent} pending=${pendingIntent || 'none'})`);
 
             const fallbackReminder = onFallback
                 ? `\n\n⚠️ تنبيه مهم: قبل استدعاء book_maintenance أو create_purchase_inquiry أو submit_support_ticket، تأكد أنك جمعت كل الحقول المطلوبة من العميل (ماركة، موديل، خدمة، تاريخ، وقت، فرع). إذا ناقص حقل — اسأل العميل عنه أولاً، ولا تخترع قيم ولا تفترض.`
@@ -1068,8 +1110,8 @@ class GeminiService {
             response = 'تكرم! 🔧 محتاج منك:\n• نوع الخدمة (صيانة / فرامل / إطارات / بنشر...)\n• ماركة السيارة وموديلها\n• الفرع (عمان/إربد/الزرقاء/العقبة)\n\nاحكيلي وبحجزلك فوراً!';
         } else if (msg.includes('فرع') || msg.includes('فروع') || msg.includes('عنوان') || msg.includes('وين')) {
             response = 'عنا 4 أفرع 📍\n1️⃣ عمان - شارع المدينة المنورة\n2️⃣ إربد - شارع الجامعة\n3️⃣ الزرقاء - شارع الأمير محمد\n4️⃣ العقبة - شارع الملك الحسين\n\nتلفون: 06-5000001';
-        } else if (msg.includes('قطع') || msg.includes('غيار') || msg.includes('سبير') || msg.includes('فلتر') || msg.includes('بطارية')) {
-            response = 'أكيد! شو القطعة ولأي سيارة؟ 🔩';
+        } else if (msg.includes('قطع') || msg.includes('غيار') || msg.includes('سبير') || msg.includes('فلتر') || msg.includes('فلاتر') || msg.includes('بطارية') || msg.includes('قطعة')) {
+            response = 'أكيد! 🔩 شو القطعة اللي بتحتاجها ولأي سيارة؟';
         } else if (msg.includes('موظف') || msg.includes('حدا') || msg.includes('شكوى') || msg.includes('مدير')) {
             response = 'تكرم يا غالي 📱 تلفون: 06-5000001\nأو افتحلك تذكرة ويتواصلوا معك.';
         } else if (msg.includes('سيارة') || msg.includes('شراء') || msg.includes('اشتري') || msg.includes('تويوتا') || msg.includes('كيا') || msg.includes('هيونداي') || msg.includes('نيسان')) {
