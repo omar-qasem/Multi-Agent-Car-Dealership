@@ -66,8 +66,18 @@ function getFlowDirective(intent, entities, convState) {
     const flowState = convState?.flow_state || null;
 
     // ── Start a new booking flow? ────────────────────────────────
+    // Trigger on explicit booking intent OR on service_type entity alone (without
+    // date) when there's no purchase-indicating entity (budget / condition / fuel).
+    // This covers short service requests like "غيار زيت" or "مكيف" where the
+    // classifier extracts the service but can't detect intent from keywords alone.
+    const looksLikeServiceRequest = (
+        intent === 'unknown' &&
+        entities.service_type &&
+        !entities.budget &&
+        !entities.condition
+    );
     const shouldStartBooking = (
-        (intent === 'booking' || (intent === 'unknown' && entities.service_type && entities.date)) &&
+        (intent === 'booking' || looksLikeServiceRequest) &&
         (!flowState || flowState.flow_id !== 'booking' || flowState.step === 'done')
     );
 

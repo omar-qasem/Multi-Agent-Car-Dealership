@@ -710,10 +710,12 @@ class GeminiService {
             // `reasoning_format: 'hidden'` the CoT is dropped from the
             // response but it still counts against max_tokens.
             //
-            // Budget: 1000 for reasoning models (CoT ~600 + response ~400) keeps total
-            // request (input ~4800 + output 1000) at ~5800 tokens — safely under the
+            // Budget: 1000 for reasoning models (CoT ~500 + response ~500) keeps total
+            // request (input ~3400 + output 1000) at ~4400 tokens — safely under the
             // 6K TPM limit for qwen/qwen3-32b on Groq free tier, avoiding 413 entirely.
-            // Reduced from 1500 after logs showed consistent 413 at ~6664 tokens.
+            // WARNING: do NOT reduce below 1000 for reasoning models — the CoT alone
+            // consumes ~500-600 tokens, leaving fewer than 100 for the actual answer
+            // which causes the model to output truncated error messages ("صار مشكلة").
             const reasoning = this._reasoningParamsFor(activeModel);
             const usingReasoning = Object.keys(reasoning).length > 0;
 
@@ -721,7 +723,7 @@ class GeminiService {
                 model: activeModel,
                 tools: activeTools,
                 tool_choice: 'auto',
-                max_tokens: usingReasoning ? 600 : 400,
+                max_tokens: usingReasoning ? 1000 : 400,
                 temperature: usingReasoning ? 0.6 : 0.2, // Qwen3 docs recommend 0.6 when reasoning is on
                 ...reasoning,
             };
@@ -869,7 +871,7 @@ class GeminiService {
                     // LLM2 only formats tool results → needs fewer tokens → faster.
                     // Keep 350 for non-reasoning models; 1000 for reasoning models
                     // (enough for CoT + Arabic reply, stays within 6K TPM budget).
-                    const llm2MaxTokens = usingReasoning ? 600 : 350;
+                    const llm2MaxTokens = usingReasoning ? 1000 : 350;
                     const llm2Params = {
                         ...llmParams,
                         max_tokens: llm2MaxTokens,
