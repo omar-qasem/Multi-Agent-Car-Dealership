@@ -42,7 +42,7 @@ const SYSTEM_PROMPT = '# أبو الزوز — مساعد أوتو جوردن �
 '7. **ممنوع وصف استخدام الأداة للعميل** — لا تكتب "سأستخدم أداة X" أو "حسناً استخدم أداة Y" أو "ابحث عن..." — استدعِ الأداة مباشرةً بصمت\n' +
 '8. **ممنوع X أو [...] كمكان شاغر** — إذا ما عندك معلومة اسأل سؤالاً محدداً — لا تُرسل رسالة ناقصة تحتوي X أو [اسم] أو مكان شاغر\n' +
 '9. **compare_cars** — استخدم الماركة والموديل اللي ذكرهم العميل فقط — لا تخترع موديلات من عندك\n' +
-'10. **"احجزلي"/"اخذها"/"اقصطها" في سياق الشراء** — إذا كان pending_intent=purchase أو عرضت نتائج search_cars وطلب العميل الشراء/الحجز → استدعِ create_purchase_inquiry، وليس book_maintenance (الذي هو لصيانة السيارات فقط)\n' +
+'10. **سياق الشراء والصيانة لا يختلطان أبداً** — `check_branch_availability` و`book_maintenance` لصيانة السيارات حصراً. إذا كان pending_intent=purchase أو ظهرت نتائج search_cars → أي ذكر لوقت/تاريخ/حجز/موعد من العميل يعني اختبار قيادة أو تسليم سيارة → استدعِ create_purchase_inquiry فقط. لا تستدعِ book_maintenance في سياق الشراء أبداً حتى لو قال "بكرا الساعة 5" أو "عال٥ العصر".\n' +
 '11. **اختيار من نتائج البحث** — إذا قال العميل "[لون]/الأولى/الثانية/هاي/هادي" بعد ما عرضت search_cars → لا تبدأ search_cars من جديد ولا تسأل "شو الماركة" — ابحث في تاريخ المحادثة عن السيارة التي يقصدها واستدعِ create_purchase_inquiry مباشرة\n\n' +
 '---\n\n' +
 '## 🔧 حجز الصيانة:\n\n' +
@@ -105,6 +105,7 @@ const PROMPT_FALLBACK =
 'قواعد: ممنوع اختراع أسعار | ممنوع تأكيد حجز بدون booking_id | ممنوع استدعاء أداة كتابة قبل جمع كل حقولها | خطأ تقني → "واجهنا مشكلة، اتصل 06-5000001" | ذاكرة العميل مرجعية فقط — ما يقوله الآن يأخذ الأولوية\n' +
 'ممنوع وصف استخدام أداة للعميل — استدعِ الأداة بصمت ولا تكتب "سأستخدم أداة X" | ممنوع كتابة X كمكان شاغر — اسأل العميل إذا ما عندك المعلومة\n\n' +
 'الحجز: اجمع (خدمة + ماركة + موديل + تاريخ + فرع) → check_branch_availability → book_maintenance\n' +
+'⛔ إذا كان pending_intent=purchase في السياق → لا تستدعِ check_branch_availability أو book_maintenance أبداً حتى لو ذكر العميل وقتاً — هذا لاختبار القيادة → استدعِ create_purchase_inquiry\n' +
 'الشراء: search_cars بالفلاتر → create_purchase_inquiry عند الاهتمام الجدي\n' +
 'القطع: check_parts_inventory | شكوى/موظف: submit_support_ticket\n\n' +
 'أوتو جوردن: 📞 06-5000001 | عمان، إربد، الزرقاء، العقبة | أحد-خميس 8ص-8م | جمعة 8ص-2م | سبت 8ص-6م';
@@ -621,6 +622,15 @@ class GeminiService {
                     if (classification.intent === 'unknown') {
                         classifierHint += ` — هذه رسالة ضمن محادثة جارية، ليست تحية ولا موضوع جديد`;
                     }
+                }
+
+                // Purchase context hard-block: when we know the customer is in a purchase
+                // flow, any mention of time/date/appointment must be a test-drive request —
+                // NEVER a maintenance booking. This fires on unknown + affirmation replies
+                // like "طيب عال5 العصر اذا" that the model might otherwise misread as a
+                // maintenance time slot combined with customer memory (car + branch).
+                if (pendingIntent === 'purchase' && (classification.intent === 'unknown' || classification.intent === 'affirmation')) {
+                    classifierHint += `\n- ⛔ سياق الشراء نشط: لا تستدعِ check_branch_availability أو book_maintenance — هذه أدوات الصيانة فقط. إذا ذكر العميل وقتاً أو تاريخاً (مثل "عال5 العصر"/"بكرا") → هذا موعد اختبار قيادة أو تسليم → استدعِ create_purchase_inquiry.`;
                 }
 
                 // Affirmation: explicit signal that customer is saying "yes" to prior question.
