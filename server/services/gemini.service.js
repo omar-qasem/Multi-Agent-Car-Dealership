@@ -1064,6 +1064,19 @@ class GeminiService {
         } catch (error) {
             clearTimeout(abortTimer);
             logger.error('❌ AI Error:', error.message);
+            // Before falling back to keyword matching, try the classifier's canned response.
+            // classify() is <1ms and deterministic — safe to re-run in catch.
+            try {
+                const cls = classify(userMessage);
+                if (cls.cannedResponse) {
+                    logger.info(`⚡ Fallback: using classifier canned response (${cls.intent})`);
+                    return {
+                        response: cls.cannedResponse,
+                        responseTime: Date.now() - startTime,
+                        toolsUsed: [], toolCallCount: 0, escalated: false, fromCache: false,
+                    };
+                }
+            } catch { /* ignore — proceed to keyword fallback */ }
             return this._fallbackResponse(userMessage, startTime, convState);
         }
     }
@@ -1102,20 +1115,45 @@ class GeminiService {
         const msg = (message || '').toLowerCase();
         let response;
 
-        // NOTE: Order matters — check maintenance BEFORE generic "سيارة" to avoid
-        // misclassifying "صيانة للسيارة" as a car purchase intent.
-        if (msg.includes('هلا') || msg.includes('مرحبا') || msg.includes('السلام') || msg.includes('هاي') || msg.includes('اهلا')) {
+        // Goodbye / thank-you — check first so "يسلا" doesn't fall to default menu
+        if (msg.includes('يسلا') || msg.includes('يسلمو') || msg.includes('شكرا') || msg.includes('شكراً') ||
+            msg.includes('باي') || msg.includes('مع السلامة') || msg.includes('موفق') || msg.includes('وداع') ||
+            msg.includes('ودا')) {
+            response = 'شكراً لتواصلك مع أوتو جوردن! 🚗 يسعدنا خدمتك دايماً. مع السلامة! 👋';
+
+        // Greetings
+        } else if (msg.includes('هلا') || msg.includes('مرحبا') || msg.includes('السلام') || msg.includes('هاي') || msg.includes('اهلا')) {
             response = 'هلا والله! أهلين فيك بأوتو جوردن 🚗\nكيف بقدر أساعدك اليوم؟\n\n1️⃣ سيارات للبيع\n2️⃣ قطع غيار\n3️⃣ حجز صيانة\n4️⃣ عروض\n5️⃣ أحكي مع موظف';
+
+        // Promotions / offers
+        } else if (msg.includes('عروض') || msg.includes('عرض') || msg.includes('تخفيض') || msg.includes('خصم') || msg.includes('اوفر')) {
+            response = 'بنعمل عروض دورية على السيارات والصيانة 🎯\nاتصل: 06-5000001 أو ابعتلنا رقمك وبتواصلوا معك بآخر العروض.';
+
+        // NOTE: check maintenance BEFORE generic "سيارة" to avoid misclassifying "صيانة للسيارة"
         } else if (msg.includes('صيانة') || msg.includes('موعد') || msg.includes('احجز') || msg.includes('حجز') || msg.includes('اصلح') || msg.includes('صلح') || msg.includes('تصليح') || msg.includes('سيرفس') || msg.includes('بنشر') || msg.includes('مبشر') || msg.includes('كوشوك') || msg.includes('عجل') || msg.includes('كفر')) {
             response = 'تكرم! 🔧 محتاج منك:\n• نوع الخدمة (صيانة / فرامل / إطارات / بنشر...)\n• ماركة السيارة وموديلها\n• الفرع (عمان/إربد/الزرقاء/العقبة)\n\nاحكيلي وبحجزلك فوراً!';
+
+        // Branches / locations
         } else if (msg.includes('فرع') || msg.includes('فروع') || msg.includes('عنوان') || msg.includes('وين')) {
             response = 'عنا 4 أفرع 📍\n1️⃣ عمان - شارع المدينة المنورة\n2️⃣ إربد - شارع الجامعة\n3️⃣ الزرقاء - شارع الأمير محمد\n4️⃣ العقبة - شارع الملك الحسين\n\nتلفون: 06-5000001';
+
+        // Parts
         } else if (msg.includes('قطع') || msg.includes('غيار') || msg.includes('سبير') || msg.includes('فلتر') || msg.includes('فلاتر') || msg.includes('بطارية') || msg.includes('قطعة')) {
             response = 'أكيد! 🔩 شو القطعة اللي بتحتاجها ولأي سيارة؟';
+
+        // Support / complaint
         } else if (msg.includes('موظف') || msg.includes('حدا') || msg.includes('شكوى') || msg.includes('مدير')) {
             response = 'تكرم يا غالي 📱 تلفون: 06-5000001\nأو افتحلك تذكرة ويتواصلوا معك.';
-        } else if (msg.includes('سيارة') || msg.includes('شراء') || msg.includes('اشتري') || msg.includes('تويوتا') || msg.includes('كيا') || msg.includes('هيونداي') || msg.includes('نيسان')) {
+
+        // Purchase — extended to match plural forms + common brands + generic "بدي" + price ranges
+        } else if (msg.includes('سيارة') || msg.includes('سيارات') || msg.includes('شراء') ||
+                   msg.includes('اشتري') || msg.includes('بدي') || msg.includes('للبيع') ||
+                   msg.includes('تويوتا') || msg.includes('كيا') || msg.includes('هيونداي') ||
+                   msg.includes('نيسان') || msg.includes('هوندا') || msg.includes('مرسيدس') ||
+                   msg.includes('bmw') || msg.includes('نيتا') || msg.includes('الاف') ||
+                   msg.includes('ميزانية') || msg.includes('سعر') || msg.includes('كم')) {
             response = 'أهلين! عنا سيارات جديدة ومستعملة 🚗\nشو الماركة اللي بتفضلها وميزانيتك؟';
+
         } else {
             response = 'أهلين بأوتو جوردن! 🚗\n\n1️⃣ سيارات للبيع\n2️⃣ قطع غيار\n3️⃣ حجز صيانة\n4️⃣ عروض\n5️⃣ موظف\n\nاحكيلي شو بتحتاج!';
         }
