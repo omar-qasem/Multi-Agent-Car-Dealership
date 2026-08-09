@@ -11,6 +11,11 @@ client/node_modules/
 client/dist/
 client/build/
 
+# Local SQLite database (dev-mode fallback data — should never be committed)
+server/database/*.db
+server/database/*.db-shm
+server/database/*.db-wal
+
 # Logs
 logs/
 *.log

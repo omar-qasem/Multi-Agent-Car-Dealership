@@ -11,7 +11,8 @@
     "build": "cd client && npm run build",
     "build:netlify": "cd client && npm install && npm run build",
     "install:all": "npm install && cd client && npm install",
-    "netlify:dev": "netlify dev"
+    "netlify:dev": "netlify dev",
+    "test": "node scripts/run-tests.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
