@@ -72,6 +72,7 @@ require.cache[DB_PATH] = {
         saveConversation: async () => {}, saveConversationState: async () => {},
         getConversationState: async () => null,
         upsertCustomer: async () => {}, getCustomer: async () => null,
+        getSystemFlag: async () => null, setSystemFlag: async () => {},
     },
 };
 

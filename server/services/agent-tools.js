@@ -374,6 +374,24 @@ async function executeTool(toolName, args, customerPhone) {
         return { success: true, promotions: promos };
       }
 
+      case 'get_service_types': {
+        // Same static price list rag.service.js injects into context for
+        // booking-intent messages — kept here too so the LLM can call it
+        // directly when the customer asks "what services do you offer?"
+        // without a booking already in progress.
+        const services = [
+          { name: 'تغيير زيت + فلتر', price_range: '25-35 دينار', duration: '45 دقيقة' },
+          { name: 'صيانة دورية 10K', price_range: '45-75 دينار', duration: '1.5-2 ساعة' },
+          { name: 'صيانة دورية 20K', price_range: '80-120 دينار', duration: '2-3 ساعات' },
+          { name: 'فحص شامل', price_range: 'مجاني مع الصيانة', duration: null },
+          { name: 'إطارات', price_range: '8-12 دينار/إطار', duration: null },
+          { name: 'بريك', price_range: '35-85 دينار', duration: null },
+          { name: 'كهرباء', price_range: '20-50 دينار', duration: null },
+          { name: 'مكيف', price_range: '25-40 دينار', duration: null },
+        ];
+        return { success: true, services };
+      }
+
       case 'get_branch_info': {
         const branches = {
           'عمان': { name: 'عمان (الرئيسي)', address: 'شارع المدينة المنورة، قرب دوار الداخلية', phone: '06-5000001', hours: 'أيام الأسبوع 8ص-8م | الجمعة 8ص-2م | السبت 8ص-6م', services: 'مبيعات، صيانة، قطع غيار، سمكرة ودهان' },

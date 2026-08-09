@@ -8,6 +8,15 @@
 const path = require('node:path');
 const assert = require('node:assert');
 
+// Always a future date so book_maintenance's past-date guard never rejects
+// these fixtures regardless of when the suite runs.
+function futureDateStr(daysAhead = 30) {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + daysAhead);
+    return d.toISOString().split('T')[0];
+}
+
+
 // ---------------------------------------------------------------
 // Stub the database module BEFORE requiring agent-tools.
 // ---------------------------------------------------------------
@@ -57,7 +66,7 @@ test('book_maintenance: missing preferred_time → needs_more_info', async () =>
         car_make: 'Toyota',
         car_model: 'Camry',
         service_type: 'تغيير زيت',
-        preferred_date: '2026-05-01',
+        preferred_date: futureDateStr(),
         branch: 'عمان',
         // preferred_time intentionally missing
     }, '+962791234567');
@@ -73,7 +82,7 @@ test('book_maintenance: unparseable preferred_time → needs_more_info (no defau
         car_make: 'Toyota',
         car_model: 'Camry',
         service_type: 'تغيير زيت',
-        preferred_date: '2026-05-01',
+        preferred_date: futureDateStr(),
         preferred_time: 'غير واضح',
         branch: 'عمان',
     }, '+962791234567');
@@ -89,7 +98,7 @@ test('book_maintenance: valid Arabic short time "9:00 ص" → canonical "09:00"'
         car_make: 'Toyota',
         car_model: 'Camry',
         service_type: 'تغيير زيت',
-        preferred_date: '2026-05-01',
+        preferred_date: futureDateStr(),
         preferred_time: '9:00 ص',
         branch: 'عمان',
     }, '+962791234567');
@@ -106,7 +115,7 @@ test('book_maintenance: valid Arabic long "9:00 صباحاً" now maps to 09:00'
         car_make: 'Toyota',
         car_model: 'Camry',
         service_type: 'تغيير زيت',
-        preferred_date: '2026-05-01',
+        preferred_date: futureDateStr(),
         preferred_time: '9:00 صباحاً',
         branch: 'عمان',
     }, '+962791234567');
@@ -120,7 +129,7 @@ test('book_maintenance: "5:00 م" (PM) → canonical "17:00"', async () => {
         car_make: 'Toyota',
         car_model: 'Camry',
         service_type: 'تغيير زيت',
-        preferred_date: '2026-05-01',
+        preferred_date: futureDateStr(),
         preferred_time: '5:00 م',
         branch: 'عمان',
     }, '+962791234567');
@@ -134,7 +143,7 @@ test('book_maintenance: off-hours time (20:00) → rejected', async () => {
         car_make: 'Toyota',
         car_model: 'Camry',
         service_type: 'تغيير زيت',
-        preferred_date: '2026-05-01',
+        preferred_date: futureDateStr(),
         preferred_time: '20:00',
         branch: 'عمان',
     }, '+962791234567');
@@ -165,7 +174,7 @@ test('check_branch_availability: returns display-form slots', async () => {
     fakeDb._reset();
     const result = await executeTool('check_branch_availability', {
         branch: 'عمان',
-        date: '2026-05-01',
+        date: futureDateStr(),
     }, '+962791234567');
     assert.strictEqual(result.success, true);
     assert.strictEqual(result.is_available, true);
@@ -182,12 +191,12 @@ test('check_branch_availability: legacy Arabic-long bookings are filtered correc
     fakeDb._bookings.push({
         id: 'BK-LEGACY',
         branch: 'عمان',
-        preferred_date: '2026-05-01',
+        preferred_date: futureDateStr(),
         preferred_time: '9:00 صباحاً', // old default
     });
     const result = await executeTool('check_branch_availability', {
         branch: 'عمان',
-        date: '2026-05-01',
+        date: futureDateStr(),
     }, '+962791234567');
     assert.ok(!result.available_slots_canonical.includes('09:00'),
         '09:00 should be taken by the legacy booking');
@@ -200,12 +209,12 @@ test('check_branch_availability: canonical bookings (new format) also filtered',
     fakeDb._bookings.push({
         id: 'BK-NEW',
         branch: 'عمان',
-        preferred_date: '2026-05-01',
+        preferred_date: futureDateStr(),
         preferred_time: '09:00', // new canonical
     });
     const result = await executeTool('check_branch_availability', {
         branch: 'عمان',
-        date: '2026-05-01',
+        date: futureDateStr(),
     }, '+962791234567');
     assert.ok(!result.available_slots_canonical.includes('09:00'));
 });

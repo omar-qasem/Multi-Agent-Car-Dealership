@@ -147,8 +147,11 @@ test('webhook.routes.js records webhook_requests_total and webhook_duration_ms',
 });
 
 test('step() wires step_duration_ms + step_errors_total', () => {
+    // step() itself now lives in shared-steps.js (extracted so
+    // webhook.routes.js and process-ai-background.js share one
+    // implementation) — the metrics calls live there, not in the route file.
     const src = fs.readFileSync(
-        require.resolve('../server/routes/webhook.routes'), 'utf8');
+        require.resolve('../server/utils/shared-steps'), 'utf8');
     assert.ok(/metrics\.observe\('step_duration_ms'/.test(src),
         'step() must observe step_duration_ms');
     assert.ok(/metrics\.inc\('step_total'/.test(src),

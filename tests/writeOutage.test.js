@@ -8,6 +8,15 @@
 const path = require('node:path');
 const assert = require('node:assert');
 
+// Always a future date so book_maintenance's past-date guard never rejects
+// these fixtures regardless of when the suite runs.
+function futureDateStr(daysAhead = 30) {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + daysAhead);
+    return d.toISOString().split('T')[0];
+}
+
+
 // Stub the db module via require.cache BEFORE loading agent-tools.
 const DB_PATH = path.resolve(__dirname, '../server/database/db.js');
 
@@ -51,7 +60,7 @@ test('book_maintenance: DB down → success=false, write_persisted=false', async
     const result = await executeTool('book_maintenance', {
         car_make: 'Toyota', car_model: 'Camry',
         service_type: 'تغيير زيت',
-        preferred_date: '2026-05-01', preferred_time: '9:00 ص',
+        preferred_date: futureDateStr(), preferred_time: '9:00 ص',
         branch: 'عمان',
     }, '+962791234567');
     assert.strictEqual(result.success, false,
@@ -71,7 +80,7 @@ test('book_maintenance: transient network error → retry_advised=true', async (
     const result = await executeTool('book_maintenance', {
         car_make: 'Toyota', car_model: 'Camry',
         service_type: 'تغيير زيت',
-        preferred_date: '2026-05-01', preferred_time: '9:00 ص',
+        preferred_date: futureDateStr(), preferred_time: '9:00 ص',
         branch: 'عمان',
     }, '+962791234567');
     assert.strictEqual(result.success, false);

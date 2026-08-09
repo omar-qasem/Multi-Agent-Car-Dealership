@@ -234,5 +234,14 @@ const TOOL_DEFINITIONS = [
       },
     },
   },
+
+  {
+    type: 'function',
+    function: {
+      name: 'get_service_types',
+      description: 'عرض قائمة خدمات الصيانة المتاحة مع الأسعار التقريبية والمدة. استدعها لما العميل يسأل عن الخدمات أو الأسعار بشكل عام قبل ما يحدد نوع خدمة معين.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
 ];
 module.exports = { BRANCH_ENUM, TOOL_DEFINITIONS };

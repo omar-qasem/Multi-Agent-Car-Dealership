@@ -41,9 +41,13 @@ function mockRes() {
 }
 
 function clearModuleTree() {
-    // Wipe all cached modules for a fresh load.
+    // Wipe all cached modules for a fresh load. require.cache keys are
+    // absolute filesystem paths, which use '\' on Windows — matching only
+    // '/server/' silently no-ops there and leaks stubs/state across tests.
+    const path = require('node:path');
+    const marker = `${path.sep}server${path.sep}`;
     for (const k of Object.keys(require.cache)) {
-        if (k.includes('/server/')) delete require.cache[k];
+        if (k.includes(marker) || k.includes('/server/')) delete require.cache[k];
     }
 }
 

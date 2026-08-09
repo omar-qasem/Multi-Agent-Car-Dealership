@@ -325,14 +325,20 @@ test('webhook.routes.js: generates request_id and builds a child logger', () => 
 });
 
 test('step() helper accepts a log override for correlation', () => {
-    const src = fs.readFileSync(
-        require.resolve('../server/routes/webhook.routes'), 'utf8');
-    assert.ok(/log\s*=\s*logger/.test(src),
+    // step() itself now lives in shared-steps.js (extracted so
+    // webhook.routes.js and process-ai-background.js share one
+    // implementation) — its `log = logger` default lives there.
+    const stepSrc = fs.readFileSync(
+        require.resolve('../server/utils/shared-steps'), 'utf8');
+    assert.ok(/log\s*=\s*logger/.test(stepSrc),
         'step() options must default log to root logger');
+
     // Every step() call in processMessage must forward the scoped log.
     // After P2-02 the canonical trailing-option shape is `, log, trace }`
     // for pipeline steps, and `, log }` for one-offs — either forwards log.
-    const matches = src.match(/,\s*log(?:,\s*trace)?\s*\}/g) || [];
+    const routeSrc = fs.readFileSync(
+        require.resolve('../server/routes/webhook.routes'), 'utf8');
+    const matches = routeSrc.match(/,\s*log(?:,\s*trace)?\s*\}/g) || [];
     assert.ok(matches.length >= 6,
         `expected ≥6 step() calls to forward log, found ${matches.length}`);
 });
